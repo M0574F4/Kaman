@@ -181,23 +181,6 @@ function mountUi(): void {
         <button id="record-btn" disabled>Start Capture</button>
       </div>
 
-      <label class="toggle-row" for="exact-pitch-toggle">
-        <input id="exact-pitch-toggle" type="checkbox" />
-        Show exact intonation offset on staff (unquantized live placement)
-      </label>
-      <label class="toggle-row" for="trail-toggle">
-        <input id="trail-toggle" type="checkbox" checked />
-        Enable note fade trail animation
-      </label>
-      <label class="toggle-row" for="string-purity-toggle">
-        <input id="string-purity-toggle" type="checkbox" />
-        Detect adjacent-string bleed (experimental)
-        <span class="bleed-threshold-group">
-          Min bleed score
-          <input id="bleed-threshold-input" type="number" min="0.05" max="0.49" step="0.01" value="0.14" />
-        </span>
-      </label>
-
       <p id="capture-hint" class="muted"></p>
 
       <div class="grid">
@@ -265,6 +248,22 @@ function mountUi(): void {
               <input id="tolerance-input" type="number" min="20" max="300" step="5" value="80" />
             </label>
           </div>
+          <label class="toggle-row" for="exact-pitch-toggle">
+            <input id="exact-pitch-toggle" type="checkbox" />
+            Show exact intonation offset on staff (unquantized live placement)
+          </label>
+          <label class="toggle-row" for="trail-toggle">
+            <input id="trail-toggle" type="checkbox" checked />
+            Enable note fade trail animation
+          </label>
+          <label class="toggle-row" for="string-purity-toggle">
+            <input id="string-purity-toggle" type="checkbox" />
+            Detect adjacent-string bleed (experimental)
+            <span class="bleed-threshold-group">
+              Min bleed score
+              <input id="bleed-threshold-input" type="number" min="0.05" max="0.49" step="0.01" value="0.14" />
+            </span>
+          </label>
           <label class="toggle-row compact" for="visual-metronome-toggle">
             <input id="visual-metronome-toggle" type="checkbox" />
             Visual metronome
