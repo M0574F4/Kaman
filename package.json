@@ -1,0 +1,18 @@
+{
+  "name": "violin-practice-webapp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "sh -c 'trap \"kill 0\" EXIT; npm run export:watch & vite'",
+    "build": "tsc -b && vite build",
+    "export:watch": "vite build --watch",
+    "export:once": "vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

@@ -1,0 +1,1 @@
+{"root":["./src/main.ts","./src/audio/mic.ts","./src/audio/pipeline.ts","./src/audio/pitch-estimator.ts","./src/audio/types.ts","./src/modes/live-mode.ts","./src/modes/sequence-mode.ts","./src/notation/solfege.ts","./src/notation/staff-placeholder.ts","./src/state/store.ts"],"version":"5.9.3"}

@@ -1,0 +1,19 @@
+# Phase 1 Run Checklist
+
+# 1) Install dependencies
+npm install
+
+# 2) Start dev server
+npm run dev
+
+# 3) In browser
+# - Click "Start Listening"
+# - Allow microphone permissions
+# - Switch between Live Mode / Sequence Mode
+# - In Sequence Mode click "Start Capture", play, then "Stop Capture"
+
+# 4) Next implementation tasks
+# - Replace PlaceholderPitchEstimator with YIN implementation
+# - Add note stability/hysteresis state machine
+# - Add quantization of note durations to BPM grid
+# - Replace staff placeholder with VexFlow or equivalent
