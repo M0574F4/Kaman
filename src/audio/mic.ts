@@ -6,12 +6,18 @@ export type MicHandle = {
   ownsContext: boolean;
 };
 
-export async function startMic(sharedContext?: AudioContext): Promise<MicHandle> {
+export async function startMic(
+  sharedContext?: AudioContext,
+  micConstraintProfile: "raw" | "voice-processed" = "raw",
+): Promise<MicHandle> {
+  const useVoiceProcessing = micConstraintProfile === "voice-processed";
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
+      // iOS Safari can behave better for simultaneous mic+speaker when
+      // voice-processing constraints are enabled.
+      echoCancellation: useVoiceProcessing,
+      noiseSuppression: useVoiceProcessing,
+      autoGainControl: useVoiceProcessing,
     },
     video: false,
   });

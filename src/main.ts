@@ -116,6 +116,7 @@ let metronomeStartMs = performance.now();
 let metronomeRafId: number | null = null;
 let metronomeLastTickIndex: number | null = null;
 let metronomeAudioContext: AudioContext | null = null;
+const isLikelyIOS = detectLikelyIOS();
 
 type NoteSnapshot = {
   midi: number;
@@ -970,14 +971,27 @@ async function onToggleListening(): Promise<void> {
       window.clearTimeout(singleBeatStopTimer);
       singleBeatStopTimer = null;
     }
-    setAudioSessionType("auto");
+    setAudioSessionType("playback");
     scheduleRender();
     return;
   }
 
   try {
-    setAudioSessionType("auto");
-    micHandle = await startMic();
+    if (isLikelyIOS) {
+      setAudioSessionType("play-and-record");
+    } else {
+      setAudioSessionType("auto");
+    }
+
+    const shouldUseSharedGraph = isLikelyIOS;
+    const micProfile: "raw" | "voice-processed" = isLikelyIOS ? "voice-processed" : "raw";
+    if (shouldUseSharedGraph) {
+      const sharedAudioContext = await ensureSharedAudioContext();
+      micHandle = await startMic(sharedAudioContext, micProfile);
+    } else {
+      micHandle = await startMic(undefined, micProfile);
+    }
+
     pipeline = startPitchPipeline(micHandle, onPitchFrame);
     pipeline.setStringPurityEnabled(enableStringPurityCheck);
     if (enableMetronomeSound) {
@@ -2031,6 +2045,13 @@ function setAudioSessionType(type: "auto" | "playback" | "play-and-record"): voi
   } catch {
     // Best-effort Safari optimization only.
   }
+}
+
+function detectLikelyIOS(): boolean {
+  const ua = navigator.userAgent ?? "";
+  const platform = (navigator as Navigator & { platform?: string }).platform ?? "";
+  const maxTouchPoints = navigator.maxTouchPoints ?? 0;
+  return /iPad|iPhone|iPod/i.test(ua) || (platform === "MacIntel" && maxTouchPoints > 1);
 }
 
 mountUi();
