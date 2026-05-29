@@ -506,7 +506,7 @@ function mountUi(): void {
     const target = event.target as HTMLInputElement;
     enableMetronomeSound = target.checked;
     if (enableMetronomeSound) {
-      void ensureMetronomeAudioReady();
+      void ensureSharedAudioContext();
     }
     resetMetronomeClock();
     syncMetronomeAnimationLoop();
@@ -890,13 +890,14 @@ function maybePlayMetronomeTick(nowMs: number): void {
   metronomeLastTickIndex = tickIndex;
 }
 
-async function ensureMetronomeAudioReady(): Promise<void> {
+async function ensureSharedAudioContext(): Promise<AudioContext> {
   if (!metronomeAudioContext) {
     metronomeAudioContext = new AudioContext();
   }
   if (metronomeAudioContext.state === "suspended") {
     await metronomeAudioContext.resume();
   }
+  return metronomeAudioContext;
 }
 
 function playMetronomeClick(accent: "strong" | "medium" | "weak"): void {
@@ -966,9 +967,14 @@ async function onToggleListening(): Promise<void> {
   }
 
   try {
-    micHandle = await startMic();
+    const sharedAudioContext = await ensureSharedAudioContext();
+    micHandle = await startMic(sharedAudioContext);
     pipeline = startPitchPipeline(micHandle, onPitchFrame);
     pipeline.setStringPurityEnabled(enableStringPurityCheck);
+    if (enableMetronomeSound) {
+      resetMetronomeClock();
+      syncMetronomeAnimationLoop();
+    }
     state.listening = true;
   } catch (error) {
     console.error("Microphone start failed", error);
