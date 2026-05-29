@@ -886,28 +886,36 @@ function maybePlayMetronomeTick(nowMs: number): void {
 
   const pattern = metronomePatternForMode();
   const accent = pattern[tickIndex % pattern.length] ?? "weak";
-  playMetronomeClick(accent);
+  void playMetronomeClick(accent);
   metronomeLastTickIndex = tickIndex;
 }
 
 async function ensureSharedAudioContext(): Promise<AudioContext> {
   if (!metronomeAudioContext) {
-    metronomeAudioContext = new AudioContext();
+    metronomeAudioContext = new AudioContext({ latencyHint: "interactive" });
   }
-  if (metronomeAudioContext.state === "suspended") {
-    await metronomeAudioContext.resume();
+  if (metronomeAudioContext.state !== "running") {
+    try {
+      await metronomeAudioContext.resume();
+    } catch {
+      // Safari can leave a context in an unrecoverable/interrupted state
+      // after microphone route transitions. Recreate it in that case.
+      try {
+        await metronomeAudioContext.close();
+      } catch {
+        // no-op
+      }
+      metronomeAudioContext = new AudioContext({ latencyHint: "interactive" });
+      if (metronomeAudioContext.state !== "running") {
+        await metronomeAudioContext.resume();
+      }
+    }
   }
   return metronomeAudioContext;
 }
 
-function playMetronomeClick(accent: "strong" | "medium" | "weak"): void {
-  if (!metronomeAudioContext) {
-    metronomeAudioContext = new AudioContext();
-  }
-  const ctx = metronomeAudioContext;
-  if (ctx.state === "suspended") {
-    void ctx.resume();
-  }
+async function playMetronomeClick(accent: "strong" | "medium" | "weak"): Promise<void> {
+  const ctx = await ensureSharedAudioContext();
 
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
@@ -962,16 +970,18 @@ async function onToggleListening(): Promise<void> {
       window.clearTimeout(singleBeatStopTimer);
       singleBeatStopTimer = null;
     }
+    setAudioSessionType("auto");
     scheduleRender();
     return;
   }
 
   try {
-    const sharedAudioContext = await ensureSharedAudioContext();
-    micHandle = await startMic(sharedAudioContext);
+    setAudioSessionType("auto");
+    micHandle = await startMic();
     pipeline = startPitchPipeline(micHandle, onPitchFrame);
     pipeline.setStringPurityEnabled(enableStringPurityCheck);
     if (enableMetronomeSound) {
+      await ensureSharedAudioContext();
       resetMetronomeClock();
       syncMetronomeAnimationLoop();
     }
@@ -2006,6 +2016,21 @@ function bleedOverlayIntensity(bleedRatio: number): number {
   const minBleed = minBleedScore;
   const maxSecondaryBleed = 0.49;
   return clamp((bleedRatio - minBleed) / (maxSecondaryBleed - minBleed), 0, 1);
+}
+
+function setAudioSessionType(type: "auto" | "playback" | "play-and-record"): void {
+  try {
+    const nav = navigator as Navigator & {
+      audioSession?: {
+        type?: string;
+      };
+    };
+    if (nav.audioSession && typeof nav.audioSession.type === "string") {
+      nav.audioSession.type = type;
+    }
+  } catch {
+    // Best-effort Safari optimization only.
+  }
 }
 
 mountUi();
