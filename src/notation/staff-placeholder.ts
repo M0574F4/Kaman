@@ -1,7 +1,7 @@
 import type { NoteEvent } from "../audio/types";
 
 const STAFF = {
-  topLineY: 26,
+  topLineY: 56,
   lineGap: 26,
   lineCount: 5,
 };

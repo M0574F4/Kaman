@@ -204,6 +204,9 @@ function mountUi(): void {
               <div class="staff-note-stem"></div>
             </div>
           </div>
+          <div class="staff-metronome-dock">
+            <div id="metronome-box" class="metronome-box"></div>
+          </div>
         </section>
 
         <section class="card">
@@ -273,7 +276,6 @@ function mountUi(): void {
             <input id="sound-metronome-toggle" type="checkbox" />
             Metronome sound
           </label>
-          <div id="metronome-box" class="metronome-box"></div>
           <div id="beat-batch-box" class="beat-batch-box"></div>
           <p id="live-meta-line" class="meta-line">- | 0% | cents: - | Not listening</p>
           <p id="purity-meta-line" class="meta-line muted purity-line"></p>

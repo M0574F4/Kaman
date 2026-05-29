@@ -181,6 +181,17 @@ button.primary {
   background: #fffdf8;
 }
 
+.staff-metronome-dock {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.35rem;
+}
+
+.staff-metronome-dock .metronome-box {
+  margin: 0;
+  min-width: 210px;
+}
+
 .beat-batch-box {
   margin: 0.1rem 0 0.6rem;
   min-height: 72px;
@@ -332,7 +343,7 @@ button.primary {
 .staff {
   margin: 0.45rem 0 0;
   position: relative;
-  height: 184px;
+  height: 252px;
   border-left: 2px solid #a6906f;
   border-right: 2px solid #a6906f;
   background: #fffef9;
@@ -347,11 +358,11 @@ button.primary {
   background: #78654b;
 }
 
-.staff-line.l1 { top: 26px; }
-.staff-line.l2 { top: 52px; }
-.staff-line.l3 { top: 78px; }
-.staff-line.l4 { top: 104px; }
-.staff-line.l5 { top: 130px; }
+.staff-line.l1 { top: 56px; }
+.staff-line.l2 { top: 82px; }
+.staff-line.l3 { top: 108px; }
+.staff-line.l4 { top: 134px; }
+.staff-line.l5 { top: 160px; }
 
 .trail-layer,
 .ledger-layer {
@@ -477,7 +488,7 @@ button.primary {
 .staff-rest-token {
   position: absolute;
   left: 50%;
-  top: 78px;
+  top: 108px;
   transform: translateX(-50%);
   font-size: 1rem;
   color: #6f7a73;
