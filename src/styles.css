@@ -392,6 +392,128 @@ button.primary {
   color: #6b756e;
 }
 
+.practice-debug {
+  margin-top: 0.65rem;
+}
+
+.practice-debug-empty {
+  color: #6b756e;
+  font-size: 0.85rem;
+}
+
+.practice-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.practice-debug-cell {
+  min-width: 0;
+  padding: 0.48rem;
+  border: 1px solid #e4d8c6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.practice-debug-cell span,
+.practice-trace-label span {
+  display: block;
+  color: #60706b;
+  font-size: 0.72rem;
+  line-height: 1.1;
+}
+
+.practice-debug-cell strong {
+  display: block;
+  margin-top: 0.12rem;
+  color: #1f2f2a;
+  font-size: 1rem;
+  line-height: 1.1;
+}
+
+.practice-debug-cell small,
+.practice-trace-label small {
+  display: block;
+  margin-top: 0.22rem;
+  color: #6b756e;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.practice-level {
+  position: relative;
+  height: 8px;
+  margin-top: 0.42rem;
+  border-radius: 999px;
+  background: #e5e0d7;
+  overflow: hidden;
+}
+
+.practice-level-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #2d6a4f;
+}
+
+.practice-level-marker {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #b00020;
+}
+
+.practice-level-marker.noise {
+  background: #7f8b8c;
+}
+
+.practice-trace-wrap {
+  margin-top: 0.55rem;
+}
+
+.practice-trace-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.practice-trace {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 64px;
+  margin-top: 0.32rem;
+  padding: 0.22rem;
+  border: 1px solid #e4d8c6;
+  border-radius: 8px;
+  background:
+    linear-gradient(0deg, rgba(45, 106, 79, 0.12) 0 1px, transparent 1px) 0 50% / 100% 50%,
+    #ffffff;
+}
+
+.practice-trace.empty {
+  height: 64px;
+}
+
+.practice-trace-bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  border-radius: 2px 2px 0 0;
+  background: #bfd4ca;
+}
+
+.practice-trace-bar.inactive {
+  background: #d9d6cf;
+  opacity: 0.55;
+}
+
+.practice-trace-bar.peak {
+  background: #b00020;
+  box-shadow: 0 0 0 1px rgba(176, 0, 32, 0.24);
+}
+
 .staff {
   margin: 0.45rem 0 0;
   position: relative;

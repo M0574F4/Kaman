@@ -1,4 +1,4 @@
-import type { NoteEvent } from "../audio/types";
+import type { NoteEvent, TempoDebugFrame } from "../audio/types";
 import type { LiveViewModel } from "../modes/live-mode";
 
 export type AppMode = "live" | "practice" | "sequence" | "spectrum";
@@ -16,6 +16,7 @@ export type PracticeViewModel = {
   confidence: number;
   status: PracticeTempoStatus;
   novelty: number;
+  debug: TempoDebugFrame | null;
 };
 
 export type AppState = {
@@ -48,6 +49,7 @@ export function createInitialState(): AppState {
       confidence: 0,
       status: "idle",
       novelty: 0,
+      debug: null,
     },
     sequence: [],
   };

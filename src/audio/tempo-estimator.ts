@@ -1,4 +1,4 @@
-import type { PitchFrame, TempoFrame, TempoStatus } from "./types";
+import type { PitchFrame, TempoDebugFrame, TempoFrame, TempoStatus } from "./types";
 
 type TempoEstimatorOptions = {
   targetBpm: number;
@@ -56,6 +56,12 @@ export class TempoEstimator {
   private smoothedEstimate: TempoEstimate | null = null;
   private noiseFloorRms = 0.004;
   private lastActiveMs: number | null = null;
+  private lastRms = 0;
+  private lastActive = false;
+  private lastActiveRatio = 0;
+  private lastRecentActiveRatio = 0;
+  private lastAutocorrelationEstimate: TempoEstimate | null = null;
+  private lastPeakEstimate: TempoEstimate | null = null;
 
   constructor(
     private readonly sampleRate: number,
@@ -80,6 +86,12 @@ export class TempoEstimator {
     this.smoothedEstimate = null;
     this.noiseFloorRms = 0.004;
     this.lastActiveMs = null;
+    this.lastRms = 0;
+    this.lastActive = false;
+    this.lastActiveRatio = 0;
+    this.lastRecentActiveRatio = 0;
+    this.lastAutocorrelationEstimate = null;
+    this.lastPeakEstimate = null;
   }
 
   process(
@@ -90,6 +102,8 @@ export class TempoEstimator {
   ): TempoFrame {
     const rms = rootMeanSquare(timeDomain);
     const active = this.isSignalActive(rms, pitchFrame);
+    this.lastRms = rms;
+    this.lastActive = active;
     const novelty = this.computeNovelty(timeDomain, spectrumDb, pitchFrame, rms, active);
     this.pushNoveltySample(tMs, novelty, active);
     if (active) {
@@ -97,6 +111,7 @@ export class TempoEstimator {
     }
 
     const estimate = this.estimateTempo(tMs);
+    const debug = this.buildDebugFrame(tMs);
     if (!estimate) {
       return {
         tMs,
@@ -106,6 +121,7 @@ export class TempoEstimator {
         confidence: 0,
         status: this.samples.length === 0 ? "idle" : "insufficient",
         novelty,
+        debug,
       };
     }
 
@@ -127,6 +143,7 @@ export class TempoEstimator {
       confidence: estimate.confidence,
       status,
       novelty,
+      debug,
     };
   }
 
@@ -271,8 +288,13 @@ export class TempoEstimator {
   }
 
   private estimateTempo(tMs: number): TempoEstimate | null {
+    this.lastAutocorrelationEstimate = null;
+    this.lastPeakEstimate = null;
+
     if (this.lastActiveMs === null || tMs - this.lastActiveMs > 900) {
       this.smoothedEstimate = null;
+      this.lastActiveRatio = 0;
+      this.lastRecentActiveRatio = 0;
       return null;
     }
 
@@ -291,6 +313,8 @@ export class TempoEstimator {
     const activeCount = activeSamples.filter((sample) => sample.active).length;
     const activeRatio = activeCount / activeSamples.length;
     const recentActiveRatio = recentSamples.length === 0 ? 0 : recentActiveCount / recentSamples.length;
+    this.lastActiveRatio = activeRatio;
+    this.lastRecentActiveRatio = recentActiveRatio;
     if (activeRatio < 0.18 || recentActiveRatio < 0.16 || recentActiveCount < 8) {
       this.smoothedEstimate = null;
       return null;
@@ -307,12 +331,43 @@ export class TempoEstimator {
 
     const autocorrelationEstimate = this.estimateFromAutocorrelation(centered);
     const peakEstimate = this.estimateFromOnsetPeaks(activeSamples);
+    this.lastAutocorrelationEstimate = autocorrelationEstimate;
+    this.lastPeakEstimate = peakEstimate;
     const rawEstimate = combineTempoEstimates(autocorrelationEstimate, peakEstimate);
     if (!rawEstimate) {
       return null;
     }
 
     return this.stabilizeEstimate(rawEstimate);
+  }
+
+  private buildDebugFrame(tMs: number): TempoDebugFrame {
+    const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
+    const peaks = pickOnsetPeaks(activeSamples, this.opts.onsetRefractoryMs);
+    const pointStep = Math.max(1, Math.ceil(activeSamples.length / 96));
+    const points = activeSamples
+      .filter((_, index) => index % pointStep === 0)
+      .map((sample) => ({
+        ageMs: tMs - sample.tMs,
+        value: sample.value,
+        active: sample.active,
+        peak: peaks.some((peak) => Math.abs(peak.tMs - sample.tMs) <= this.opts.sampleStepMs * pointStep * 0.6),
+      }));
+
+    return {
+      rms: this.lastRms,
+      noiseFloorRms: this.noiseFloorRms,
+      gateRms: Math.max(this.opts.minSignalRms, this.noiseFloorRms * this.opts.noiseGateRatio),
+      active: this.lastActive,
+      activeRatio: this.lastActiveRatio,
+      recentActiveRatio: this.lastRecentActiveRatio,
+      peakCount: peaks.length,
+      autocorrelationBpm: this.lastAutocorrelationEstimate?.bpm ?? null,
+      autocorrelationConfidence: this.lastAutocorrelationEstimate?.confidence ?? 0,
+      peakBpm: this.lastPeakEstimate?.bpm ?? null,
+      peakConfidence: this.lastPeakEstimate?.confidence ?? 0,
+      points,
+    };
   }
 
   private estimateFromAutocorrelation(centered: number[]): TempoEstimate | null {

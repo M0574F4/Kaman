@@ -150,6 +150,7 @@ type UiRefs = {
   practiceStatus: HTMLDivElement;
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
+  practiceDebug: HTMLDivElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
   liveBpmInput: HTMLInputElement;
@@ -249,6 +250,7 @@ function mountUi(): void {
             <div id="practice-status" class="practice-status status-idle">-</div>
             <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
+            <div id="practice-debug" class="practice-debug"></div>
           </div>
           <div id="sequence-controls" class="sequence-controls">
             <label>Submode
@@ -323,6 +325,7 @@ function mountUi(): void {
   const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
+  const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
@@ -366,6 +369,7 @@ function mountUi(): void {
     !practiceStatus ||
     !practiceEstimate ||
     !practiceDetail ||
+    !practiceDebug ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
     !liveBpmInput ||
@@ -412,6 +416,7 @@ function mountUi(): void {
     practiceStatus,
     practiceEstimate,
     practiceDetail,
+    practiceDebug,
     sequenceControls,
     sequenceSubmodeSelect,
     liveBpmInput,
@@ -827,6 +832,7 @@ function resetPracticeEstimate(targetBpm = sequenceSettings.bpm): void {
     confidence: 0,
     status: state.listening ? "insufficient" : "idle",
     novelty: 0,
+    debug: null,
   };
 }
 
@@ -849,6 +855,7 @@ function renderPracticePanel(): void {
     `Target ${practice.targetBpm} BPM | estimated ${estimatedText}${diffText}`;
   ui.practiceDetail.textContent =
     `Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
+  ui.practiceDebug.innerHTML = renderPracticeDebug();
 }
 
 function renderPracticeSummary(): string {
@@ -864,6 +871,88 @@ function renderPracticeSummary(): string {
     "",
     "The estimator listens for repeated changes in tone, energy, and spectrum. If the bowing is too smooth or the pulse is unclear, it will wait instead of guessing.",
   ].join("\n");
+}
+
+function renderPracticeDebug(): string {
+  const debug = state.practice.debug;
+  if (!debug) {
+    return `
+      <div class="practice-debug-empty">Waiting for audio frames.</div>
+    `;
+  }
+
+  const signalPct = rmsToDisplayPct(debug.rms);
+  const gatePct = rmsToDisplayPct(debug.gateRms);
+  const noisePct = rmsToDisplayPct(debug.noiseFloorRms);
+  const autoBpm = debug.autocorrelationBpm === null ? "-" : Math.round(debug.autocorrelationBpm).toString();
+  const peakBpm = debug.peakBpm === null ? "-" : Math.round(debug.peakBpm).toString();
+
+  return `
+    <div class="practice-debug-grid">
+      <div class="practice-debug-cell">
+        <span>Gate</span>
+        <strong>${debug.active ? "open" : "closed"}</strong>
+        <small>signal ${formatRms(debug.rms)} | gate ${formatRms(debug.gateRms)} | floor ${formatRms(debug.noiseFloorRms)}</small>
+        <div class="practice-level">
+          <div class="practice-level-fill" style="width:${signalPct.toFixed(1)}%"></div>
+          <div class="practice-level-marker gate" style="left:${gatePct.toFixed(1)}%"></div>
+          <div class="practice-level-marker noise" style="left:${noisePct.toFixed(1)}%"></div>
+        </div>
+      </div>
+      <div class="practice-debug-cell">
+        <span>Active frames</span>
+        <strong>${(debug.recentActiveRatio * 100).toFixed(0)}%</strong>
+        <small>window ${(debug.activeRatio * 100).toFixed(0)}% | recent ${(debug.recentActiveRatio * 100).toFixed(0)}%</small>
+      </div>
+      <div class="practice-debug-cell">
+        <span>Peaks</span>
+        <strong>${debug.peakCount}</strong>
+        <small>peak tempo ${peakBpm} BPM (${(debug.peakConfidence * 100).toFixed(0)}%)</small>
+      </div>
+      <div class="practice-debug-cell">
+        <span>Periodicity</span>
+        <strong>${autoBpm} BPM</strong>
+        <small>confidence ${(debug.autocorrelationConfidence * 100).toFixed(0)}%</small>
+      </div>
+    </div>
+    ${renderNoveltyTrace(debug.points)}
+  `;
+}
+
+function renderNoveltyTrace(points: TempoFrame["debug"]["points"]): string {
+  if (points.length === 0) {
+    return `<div class="practice-trace empty"></div>`;
+  }
+
+  const bars = points
+    .map((point) => {
+      const height = Math.max(3, point.value * 100);
+      const classes = [
+        "practice-trace-bar",
+        point.active ? "active" : "inactive",
+        point.peak ? "peak" : "",
+      ].filter(Boolean).join(" ");
+      return `<div class="${classes}" style="height:${height.toFixed(1)}%"></div>`;
+    })
+    .join("");
+
+  return `
+    <div class="practice-trace-wrap">
+      <div class="practice-trace-label">
+        <span>Novelty timeline</span>
+        <small>bright bars are detected event peaks</small>
+      </div>
+      <div class="practice-trace">${bars}</div>
+    </div>
+  `;
+}
+
+function rmsToDisplayPct(rms: number): number {
+  return clamp((Math.log10(rms + 0.0015) + 2.8) / 1.65, 0, 1) * 100;
+}
+
+function formatRms(rms: number): string {
+  return rms.toFixed(4);
 }
 
 function practiceStatusLabel(status: TempoFrame["status"], listening: boolean): string {
@@ -1421,6 +1510,7 @@ function onTempoFrame(frame: TempoFrame): void {
     confidence: frame.confidence,
     status: frame.status,
     novelty: frame.novelty,
+    debug: frame.debug,
   };
 
   if (state.mode === "practice") {

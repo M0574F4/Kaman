@@ -37,6 +37,29 @@ export type TempoFrame = {
   confidence: number;
   status: TempoStatus;
   novelty: number;
+  debug: TempoDebugFrame;
+};
+
+export type TempoDebugPoint = {
+  ageMs: number;
+  value: number;
+  active: boolean;
+  peak: boolean;
+};
+
+export type TempoDebugFrame = {
+  rms: number;
+  noiseFloorRms: number;
+  gateRms: number;
+  active: boolean;
+  activeRatio: number;
+  recentActiveRatio: number;
+  peakCount: number;
+  autocorrelationBpm: number | null;
+  autocorrelationConfidence: number;
+  peakBpm: number | null;
+  peakConfidence: number;
+  points: TempoDebugPoint[];
 };
 
 export type SequenceSettings = {
