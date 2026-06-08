@@ -9,6 +9,7 @@ type TempoEstimatorOptions = {
   minWindowMs: number;
   tolerancePct: number;
   minConfidence: number;
+  onsetRefractoryMs: number;
 };
 
 const DEFAULT_OPTIONS: TempoEstimatorOptions = {
@@ -19,10 +20,21 @@ const DEFAULT_OPTIONS: TempoEstimatorOptions = {
   windowMs: 8000,
   minWindowMs: 2800,
   tolerancePct: 0.055,
-  minConfidence: 0.18,
+  minConfidence: 0.16,
+  onsetRefractoryMs: 95,
 };
 
 type NoveltySample = {
+  tMs: number;
+  value: number;
+};
+
+type TempoEstimate = {
+  bpm: number;
+  confidence: number;
+};
+
+type OnsetPeak = {
   tMs: number;
   value: number;
 };
@@ -36,6 +48,7 @@ export class TempoEstimator {
   private lastSampleMs: number | null = null;
   private smoothedNovelty = 0;
   private samples: NoveltySample[] = [];
+  private smoothedEstimate: TempoEstimate | null = null;
 
   constructor(
     private readonly sampleRate: number,
@@ -57,6 +70,7 @@ export class TempoEstimator {
     this.lastSampleMs = null;
     this.smoothedNovelty = 0;
     this.samples = [];
+    this.smoothedEstimate = null;
   }
 
   process(
@@ -117,7 +131,7 @@ export class TempoEstimator {
     const spectralNovelty = this.computeSpectralFlux(spectrumDb);
     const pitchNovelty = this.computePitchNovelty(pitchFrame);
 
-    const rawNovelty = spectralNovelty * 0.62 + energyNovelty * 0.2 + pitchNovelty * 0.42;
+    const rawNovelty = spectralNovelty * 0.66 + energyNovelty * 0.22 + pitchNovelty * 0.44;
     this.smoothedNovelty = this.smoothedNovelty * 0.72 + rawNovelty * 0.28;
 
     return clamp01(rawNovelty - this.smoothedNovelty * 0.35);
@@ -139,9 +153,7 @@ export class TempoEstimator {
       const current = normalizeDb(spectrumDb[i]);
       const previous = normalizeDb(this.previousSpectrum[i]);
       const diff = current - previous;
-      if (diff > 0) {
-        flux += diff * diff;
-      }
+      flux += diff > 0 ? diff * diff : Math.abs(diff) * 0.14;
       bins += 1;
     }
 
@@ -205,7 +217,7 @@ export class TempoEstimator {
     }
   }
 
-  private estimateTempo(tMs: number): { bpm: number; confidence: number } | null {
+  private estimateTempo(tMs: number): TempoEstimate | null {
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
     if (activeSamples.length < 40) {
       return null;
@@ -220,11 +232,22 @@ export class TempoEstimator {
     const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
     const centered = values.map((value) => value - mean);
     const energy = centered.reduce((sum, value) => sum + value * value, 0);
-    const peakEnergy = values.filter((value) => value > 0.08).reduce((sum, value) => sum + value, 0);
-    if (energy < 0.05 || peakEnergy < 1.5) {
+    const peakEnergy = values.filter((value) => value > 0.065).reduce((sum, value) => sum + value, 0);
+    if (energy < 0.035 || peakEnergy < 0.75) {
       return null;
     }
 
+    const autocorrelationEstimate = this.estimateFromAutocorrelation(centered);
+    const peakEstimate = this.estimateFromOnsetPeaks(activeSamples);
+    const rawEstimate = combineTempoEstimates(autocorrelationEstimate, peakEstimate);
+    if (!rawEstimate) {
+      return null;
+    }
+
+    return this.stabilizeEstimate(rawEstimate);
+  }
+
+  private estimateFromAutocorrelation(centered: number[]): TempoEstimate | null {
     let bestBpm = 0;
     let bestScore = -Infinity;
     let secondScore = -Infinity;
@@ -247,8 +270,115 @@ export class TempoEstimator {
     }
 
     const dominance = bestScore - Math.max(0, secondScore);
-    const confidence = clamp01(bestScore * 0.72 + dominance * 1.2);
+    const confidence = clamp01(bestScore * 0.62 + dominance * 1.25);
     return { bpm: bestBpm, confidence };
+  }
+
+  private estimateFromOnsetPeaks(samples: NoveltySample[]): TempoEstimate | null {
+    const peaks = pickOnsetPeaks(samples, this.opts.onsetRefractoryMs);
+    if (peaks.length < 3) {
+      return null;
+    }
+
+    let bestBpm = 0;
+    let bestScore = -Infinity;
+    let secondScore = -Infinity;
+
+    for (let bpm = this.opts.minBpm; bpm <= this.opts.maxBpm; bpm += 1) {
+      const rawScore = this.onsetIntervalScore(peaks, bpm);
+      const score = rawScore * this.targetPrior(bpm);
+
+      if (score > bestScore) {
+        secondScore = bestScore;
+        bestScore = score;
+        bestBpm = bpm;
+      } else if (score > secondScore) {
+        secondScore = score;
+      }
+    }
+
+    if (bestBpm <= 0 || bestScore <= 0) {
+      return null;
+    }
+
+    const dominance = bestScore - Math.max(0, secondScore);
+    const confidence = clamp01(bestScore * 0.72 + dominance * 1.55);
+    return { bpm: bestBpm, confidence };
+  }
+
+  private onsetIntervalScore(peaks: OnsetPeak[], bpm: number): number {
+    const periodMs = 60_000 / bpm;
+    const intervalRatios = [
+      { ratio: 0.5, weight: 0.42 },
+      { ratio: 1, weight: 1 },
+      { ratio: 2, weight: 0.72 },
+      { ratio: 3, weight: 0.48 },
+      { ratio: 4, weight: 0.32 },
+    ];
+    const toleranceMs = Math.max(55, Math.min(150, periodMs * 0.12));
+    let score = 0;
+    let support = 0;
+
+    for (let i = 0; i < peaks.length; i += 1) {
+      for (let j = i + 1; j < peaks.length; j += 1) {
+        const intervalMs = peaks[j].tMs - peaks[i].tMs;
+        if (intervalMs > periodMs * 4.35) {
+          break;
+        }
+
+        let bestPairScore = 0;
+        for (const { ratio, weight } of intervalRatios) {
+          const expectedMs = periodMs * ratio;
+          const errorMs = Math.abs(intervalMs - expectedMs);
+          if (errorMs > toleranceMs * 2.7) {
+            continue;
+          }
+          const closeness = Math.exp(-0.5 * (errorMs / toleranceMs) ** 2);
+          bestPairScore = Math.max(bestPairScore, closeness * weight);
+        }
+
+        if (bestPairScore > 0) {
+          const strength = Math.sqrt(peaks[i].value * peaks[j].value);
+          score += bestPairScore * (0.45 + strength);
+          support += 1;
+        }
+      }
+    }
+
+    if (support === 0) {
+      return 0;
+    }
+
+    return clamp01(score / Math.max(2.5, peaks.length * 1.3));
+  }
+
+  private stabilizeEstimate(next: TempoEstimate): TempoEstimate {
+    if (!this.smoothedEstimate) {
+      this.smoothedEstimate = next;
+      return next;
+    }
+
+    const octaveDistance = Math.abs(Math.log2(next.bpm / this.smoothedEstimate.bpm));
+    if (octaveDistance <= 0.18) {
+      const bpm = this.smoothedEstimate.bpm * 0.62 + next.bpm * 0.38;
+      const confidence = Math.max(
+        next.confidence,
+        this.smoothedEstimate.confidence * 0.78 + next.confidence * 0.22,
+      );
+      this.smoothedEstimate = { bpm, confidence };
+      return this.smoothedEstimate;
+    }
+
+    if (next.confidence > this.smoothedEstimate.confidence + 0.12 || this.smoothedEstimate.confidence < 0.18) {
+      this.smoothedEstimate = next;
+      return next;
+    }
+
+    this.smoothedEstimate = {
+      bpm: this.smoothedEstimate.bpm,
+      confidence: this.smoothedEstimate.confidence * 0.94,
+    };
+    return this.smoothedEstimate;
   }
 
   private autocorrelationScore(centered: number[], bpm: number): number {
@@ -285,6 +415,68 @@ function normalizedLagCorrelation(values: number[], lag: number): number {
 
   const denominator = Math.sqrt(leftEnergy * rightEnergy) + 1e-9;
   return numerator / denominator;
+}
+
+function pickOnsetPeaks(samples: NoveltySample[], refractoryMs: number): OnsetPeak[] {
+  if (samples.length < 5) {
+    return [];
+  }
+
+  const values = samples.map((sample) => sample.value);
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / values.length;
+  const stdDev = Math.sqrt(variance);
+  const sorted = [...values].sort((a, b) => a - b);
+  const percentile75 = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
+  const threshold = Math.max(0.055, mean + stdDev * 0.45, percentile75 * 0.82);
+  const peaks: OnsetPeak[] = [];
+
+  for (let i = 2; i < samples.length - 2; i += 1) {
+    const current = samples[i].value;
+    const isLocalPeak =
+      current >= samples[i - 1].value &&
+      current > samples[i + 1].value &&
+      current >= samples[i - 2].value &&
+      current >= samples[i + 2].value;
+    if (!isLocalPeak || current < threshold) {
+      continue;
+    }
+
+    const previousPeak = peaks[peaks.length - 1] ?? null;
+    if (previousPeak && samples[i].tMs - previousPeak.tMs < refractoryMs) {
+      if (current > previousPeak.value) {
+        previousPeak.tMs = samples[i].tMs;
+        previousPeak.value = current;
+      }
+      continue;
+    }
+
+    peaks.push({ tMs: samples[i].tMs, value: current });
+  }
+
+  return peaks;
+}
+
+function combineTempoEstimates(
+  autocorrelationEstimate: TempoEstimate | null,
+  peakEstimate: TempoEstimate | null,
+): TempoEstimate | null {
+  if (!autocorrelationEstimate) return peakEstimate;
+  if (!peakEstimate) return autocorrelationEstimate;
+
+  const octaveDistance = Math.abs(Math.log2(peakEstimate.bpm / autocorrelationEstimate.bpm));
+  if (octaveDistance <= 0.16) {
+    const peakWeight = 0.64 + peakEstimate.confidence * 0.18;
+    const autoWeight = 1 - peakWeight;
+    return {
+      bpm: peakEstimate.bpm * peakWeight + autocorrelationEstimate.bpm * autoWeight,
+      confidence: clamp01(peakEstimate.confidence * 0.68 + autocorrelationEstimate.confidence * 0.42),
+    };
+  }
+
+  const peakIsStronger = peakEstimate.confidence >= autocorrelationEstimate.confidence * 0.88;
+  return peakIsStronger ? peakEstimate : autocorrelationEstimate;
 }
 
 function statusForEstimate(
