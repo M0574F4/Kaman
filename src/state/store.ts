@@ -1,7 +1,7 @@
 import type { NoteEvent } from "../audio/types";
 import type { LiveViewModel } from "../modes/live-mode";
 
-export type AppMode = "live" | "sequence";
+export type AppMode = "live" | "sequence" | "practice" | "spectrum";
 
 export type AppState = {
   mode: AppMode;

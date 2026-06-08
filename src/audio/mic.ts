@@ -26,7 +26,9 @@ export async function startMic(
   const source = context.createMediaStreamSource(stream);
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0;
+  analyser.minDecibels = -92;
+  analyser.maxDecibels = -22;
+  analyser.smoothingTimeConstant = 0.25;
   source.connect(analyser);
 
   return { context, stream, source, analyser, ownsContext: !sharedContext };

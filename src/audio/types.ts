@@ -13,6 +13,15 @@ export type PitchFrame = {
   bleedString: ViolinStringName | null;
 };
 
+export type SpectrumFrame = {
+  tMs: number;
+  sampleRate: number;
+  fftSize: number;
+  minDecibels: number;
+  maxDecibels: number;
+  magnitudesDb: Float32Array;
+};
+
 export type SequenceSettings = {
   bpm: number;
   timeSignature: "2/2" | "2/4" | "3/4" | "4/4" | "6/8";

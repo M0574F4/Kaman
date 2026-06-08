@@ -1,11 +1,24 @@
 import { startMic, stopMic, type MicHandle } from "./audio/mic";
 import { startPitchPipeline, type PipelineHandle } from "./audio/pipeline";
-import { type PitchFrame } from "./audio/types";
+import { type PitchFrame, type SpectrumFrame } from "./audio/types";
 import { LiveNoteTracker, initialLiveSettings } from "./modes/live-mode";
 import {
   SequenceCollector,
   initialSequenceSettings,
 } from "./modes/sequence-mode";
+import {
+  PRACTICE_PATTERNS,
+  PracticeSession,
+  initialPracticeTolerance,
+  type PracticePattern,
+  type PracticeSnapshot,
+  type PracticeTolerance,
+} from "./modes/practice-mode";
+import {
+  LiveSpectrogramRenderer,
+  renderSpectrumOverlay,
+  renderSpectrumSummary,
+} from "./modes/spectrum-mode";
 import {
   midiToScientific,
   midiToSolfege,
@@ -78,6 +91,7 @@ type BeatBatch = {
 const state = createInitialState();
 const sequenceSettings = initialSequenceSettings();
 const liveSettings = initialLiveSettings();
+const practiceTolerance = initialPracticeTolerance();
 const liveTracker = new LiveNoteTracker(liveSettings, 30_000);
 const collector = new SequenceCollector(sequenceSettings);
 
@@ -89,6 +103,7 @@ const BATCH_FADE_MS = 1700;
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
 let lastFrame: PitchFrame | null = null;
+let spectrogram: LiveSpectrogramRenderer | null = null;
 let renderPending = false;
 let showExactIntonation = false;
 let enableFadeTrail = true;
@@ -97,6 +112,10 @@ let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
 let sequenceSubMode: SequenceSubMode = "single-beat";
+let activePracticePattern: PracticePattern = PRACTICE_PATTERNS[0];
+let practiceBpm = activePracticePattern.bpmDefault;
+let practiceSession: PracticeSession | null = null;
+let lastPracticeSnapshot: PracticeSnapshot | null = null;
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
 let beatAttemptId = 1;
@@ -136,9 +155,15 @@ type UiRefs = {
   listenBtn: HTMLButtonElement;
   modeSelect: HTMLSelectElement;
   recordBtn: HTMLButtonElement;
+  outputTitle: HTMLHeadingElement;
   liveMetronomeControls: HTMLDivElement;
   sequenceControls: HTMLDivElement;
+  practiceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
+  practicePatternSelect: HTMLSelectElement;
+  practiceBpmInput: HTMLInputElement;
+  practicePitchToleranceInput: HTMLInputElement;
+  practiceTimingToleranceInput: HTMLInputElement;
   liveBpmInput: HTMLInputElement;
   liveBpmUpBtn: HTMLButtonElement;
   liveBpmDownBtn: HTMLButtonElement;
@@ -161,6 +186,10 @@ type UiRefs = {
   sequenceMeta: HTMLParagraphElement;
   beatBatchBox: HTMLDivElement;
   metronomeBox: HTMLDivElement;
+  staff: HTMLDivElement;
+  spectrumPanel: HTMLDivElement;
+  spectrogramCanvas: HTMLCanvasElement;
+  spectrogramOverlay: HTMLDivElement;
   staffBatchLayer: HTMLDivElement;
   noteGroup: HTMLDivElement;
   ledgerLayer: HTMLDivElement;
@@ -178,6 +207,8 @@ function mountUi(): void {
         <select id="mode-select" aria-label="Mode">
           <option value="live">Live Mode</option>
           <option value="sequence">Sequence Mode</option>
+          <option value="practice">Practice Mode</option>
+          <option value="spectrum">Spectrum Mode</option>
         </select>
         <button id="record-btn" disabled>Start Capture</button>
       </div>
@@ -190,7 +221,7 @@ function mountUi(): void {
             <p id="note-metric" class="metric">- <span class="muted">(-)</span></p>
             <p id="bleed-note-line" class="bleed-note-line">&nbsp;</p>
           </div>
-          <div class="staff" aria-label="5-line staff">
+          <div id="staff" class="staff" aria-label="5-line staff">
             <div class="staff-line l1"></div>
             <div class="staff-line l2"></div>
             <div class="staff-line l3"></div>
@@ -204,13 +235,17 @@ function mountUi(): void {
               <div class="staff-note-stem"></div>
             </div>
           </div>
+          <div id="spectrum-panel" class="spectrum-panel" aria-label="Live spectrogram">
+            <canvas id="spectrogram-canvas" class="spectrogram-canvas"></canvas>
+            <div id="spectrogram-overlay" class="spectrogram-overlay"></div>
+          </div>
           <div class="staff-metronome-dock">
             <div id="metronome-box" class="metronome-box"></div>
           </div>
         </section>
 
         <section class="card">
-          <h2>Sequence Output</h2>
+          <h2 id="output-title">Sequence Output</h2>
           <div id="live-metronome-controls" class="sequence-controls live-metro-controls">
             <label>Live BPM
               <span class="live-bpm-stepper">
@@ -252,6 +287,24 @@ function mountUi(): void {
               <input id="tolerance-input" type="number" min="20" max="300" step="5" value="80" />
             </label>
           </div>
+          <div id="practice-controls" class="sequence-controls practice-controls">
+            <label>Pattern
+              <select id="practice-pattern-select">
+                ${PRACTICE_PATTERNS.map(
+                  (pattern) => `<option value="${pattern.id}">${pattern.title}</option>`,
+                ).join("")}
+              </select>
+            </label>
+            <label>BPM
+              <input id="practice-bpm-input" type="number" min="30" max="240" step="1" value="${practiceBpm}" />
+            </label>
+            <label>Pitch cents
+              <input id="practice-pitch-tolerance-input" type="number" min="5" max="100" step="5" value="${practiceTolerance.pitchCents}" />
+            </label>
+            <label>Timing ms
+              <input id="practice-timing-tolerance-input" type="number" min="40" max="400" step="10" value="${practiceTolerance.onsetMs}" />
+            </label>
+          </div>
           <label class="toggle-row" for="exact-pitch-toggle">
             <input id="exact-pitch-toggle" type="checkbox" />
             Show exact intonation offset on staff (unquantized live placement)
@@ -289,9 +342,15 @@ function mountUi(): void {
   const listenBtn = appRoot.querySelector<HTMLButtonElement>("#listen-btn");
   const modeSelect = appRoot.querySelector<HTMLSelectElement>("#mode-select");
   const recordBtn = appRoot.querySelector<HTMLButtonElement>("#record-btn");
+  const outputTitle = appRoot.querySelector<HTMLHeadingElement>("#output-title");
   const liveMetronomeControls = appRoot.querySelector<HTMLDivElement>("#live-metronome-controls");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
+  const practiceControls = appRoot.querySelector<HTMLDivElement>("#practice-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
+  const practicePatternSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-select");
+  const practiceBpmInput = appRoot.querySelector<HTMLInputElement>("#practice-bpm-input");
+  const practicePitchToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-pitch-tolerance-input");
+  const practiceTimingToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-timing-tolerance-input");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
   const liveBpmUpBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-up");
   const liveBpmDownBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-down");
@@ -314,6 +373,10 @@ function mountUi(): void {
   const sequenceMeta = appRoot.querySelector<HTMLParagraphElement>("#sequence-meta");
   const beatBatchBox = appRoot.querySelector<HTMLDivElement>("#beat-batch-box");
   const metronomeBox = appRoot.querySelector<HTMLDivElement>("#metronome-box");
+  const staff = appRoot.querySelector<HTMLDivElement>("#staff");
+  const spectrumPanel = appRoot.querySelector<HTMLDivElement>("#spectrum-panel");
+  const spectrogramCanvas = appRoot.querySelector<HTMLCanvasElement>("#spectrogram-canvas");
+  const spectrogramOverlay = appRoot.querySelector<HTMLDivElement>("#spectrogram-overlay");
   const staffBatchLayer = appRoot.querySelector<HTMLDivElement>("#staff-batch-layer");
   const noteGroup = appRoot.querySelector<HTMLDivElement>("#staff-note-group");
   const ledgerLayer = appRoot.querySelector<HTMLDivElement>("#ledger-layer");
@@ -323,9 +386,15 @@ function mountUi(): void {
     !listenBtn ||
     !modeSelect ||
     !recordBtn ||
+    !outputTitle ||
     !liveMetronomeControls ||
     !sequenceControls ||
+    !practiceControls ||
     !sequenceSubmodeSelect ||
+    !practicePatternSelect ||
+    !practiceBpmInput ||
+    !practicePitchToleranceInput ||
+    !practiceTimingToleranceInput ||
     !liveBpmInput ||
     !liveBpmUpBtn ||
     !liveBpmDownBtn ||
@@ -348,6 +417,10 @@ function mountUi(): void {
     !sequenceMeta ||
     !beatBatchBox ||
     !metronomeBox ||
+    !staff ||
+    !spectrumPanel ||
+    !spectrogramCanvas ||
+    !spectrogramOverlay ||
     !staffBatchLayer ||
     !noteGroup ||
     !ledgerLayer ||
@@ -360,9 +433,15 @@ function mountUi(): void {
     listenBtn,
     modeSelect,
     recordBtn,
+    outputTitle,
     liveMetronomeControls,
     sequenceControls,
+    practiceControls,
     sequenceSubmodeSelect,
+    practicePatternSelect,
+    practiceBpmInput,
+    practicePitchToleranceInput,
+    practiceTimingToleranceInput,
     liveBpmInput,
     liveBpmUpBtn,
     liveBpmDownBtn,
@@ -385,11 +464,16 @@ function mountUi(): void {
     sequenceMeta,
     beatBatchBox,
     metronomeBox,
+    staff,
+    spectrumPanel,
+    spectrogramCanvas,
+    spectrogramOverlay,
     staffBatchLayer,
     noteGroup,
     ledgerLayer,
     trailLayer,
   };
+  spectrogram = new LiveSpectrogramRenderer(spectrogramCanvas);
 
   listenBtn.addEventListener("click", () => {
     void onToggleListening();
@@ -399,6 +483,52 @@ function mountUi(): void {
 
   recordBtn.addEventListener("click", () => {
     void onToggleRecording();
+  });
+
+  practicePatternSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    const nextPattern =
+      PRACTICE_PATTERNS.find((pattern) => pattern.id === target.value) ?? PRACTICE_PATTERNS[0];
+    activePracticePattern = nextPattern;
+    practiceBpm = nextPattern.bpmDefault;
+    practiceSession = null;
+    lastPracticeSnapshot = null;
+    state.recording = false;
+    resetMetronomeClock();
+    scheduleRender();
+  });
+
+  practiceBpmInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = parseInt(target.value || String(activePracticePattern.bpmDefault), 10);
+    if (!Number.isFinite(parsed)) return;
+    practiceBpm = clamp(parsed, 30, 240);
+    resetMetronomeClock();
+    scheduleRender();
+  });
+
+  practiceBpmInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = parseInt(target.value || String(activePracticePattern.bpmDefault), 10);
+    practiceBpm = Number.isFinite(parsed) ? clamp(parsed, 30, 240) : activePracticePattern.bpmDefault;
+    target.value = String(practiceBpm);
+    resetMetronomeClock();
+    scheduleRender();
+  });
+
+  practicePitchToleranceInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    practiceTolerance.pitchCents = clamp(parseInt(target.value || "35", 10), 5, 100);
+    target.value = String(practiceTolerance.pitchCents);
+    scheduleRender();
+  });
+
+  practiceTimingToleranceInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    practiceTolerance.onsetMs = clamp(parseInt(target.value || "140", 10), 40, 400);
+    practiceTolerance.durationMs = Math.max(120, practiceTolerance.onsetMs);
+    target.value = String(practiceTolerance.onsetMs);
+    scheduleRender();
   });
 
   sequenceSubmodeSelect.addEventListener("change", (event) => {
@@ -537,7 +667,7 @@ function mountUi(): void {
   stringPurityToggle.addEventListener("change", (event) => {
     const target = event.target as HTMLInputElement;
     enableStringPurityCheck = target.checked;
-    pipeline?.setStringPurityEnabled(enableStringPurityCheck);
+    syncStringPurityPipeline();
     scheduleRender();
   });
 
@@ -573,14 +703,25 @@ function render(): void {
   const displayedMidi = state.live.displayedMidi;
   const solfege = displayedMidi !== null ? midiToSolfege(displayedMidi) : "-";
   const scientific = displayedMidi !== null ? midiToScientific(displayedMidi) : "-";
+  const stringPurityActive = isStringPurityActive();
 
   ui.listenBtn.textContent = state.listening ? "Stop Listening" : "Start Listening";
-  ui.listenBtn.style.display = state.mode === "live" ? "" : "none";
+  ui.listenBtn.style.display = state.mode === "sequence" ? "none" : "";
   ui.modeSelect.value = state.mode;
   ui.recordBtn.disabled = state.mode !== "sequence";
-  ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
+  ui.recordBtn.disabled = state.mode !== "sequence" && state.mode !== "practice";
+  ui.recordBtn.style.display = state.mode === "sequence" || state.mode === "practice" ? "" : "none";
   ui.liveMetronomeControls.style.display = state.mode === "live" ? "grid" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
+  ui.practiceControls.style.display = state.mode === "practice" ? "grid" : "none";
+  ui.outputTitle.textContent =
+    state.mode === "spectrum"
+      ? "Spectrum Output"
+      : state.mode === "practice"
+        ? "Practice Output"
+      : state.mode === "live"
+        ? "Live Output"
+        : "Sequence Output";
   ui.recordBtn.textContent = captureButtonLabel();
   ui.sequenceSubmodeSelect.value = sequenceSubMode;
   const activeElement = document.activeElement;
@@ -590,6 +731,12 @@ function render(): void {
   if (activeElement !== ui.bpmInput) {
     ui.bpmInput.value = String(sequenceSettings.bpm);
   }
+  ui.practicePatternSelect.value = activePracticePattern.id;
+  if (activeElement !== ui.practiceBpmInput) {
+    ui.practiceBpmInput.value = String(practiceBpm);
+  }
+  ui.practicePitchToleranceInput.value = String(practiceTolerance.pitchCents);
+  ui.practiceTimingToleranceInput.value = String(practiceTolerance.onsetMs);
   ui.timeSignatureSelect.value = sequenceSettings.timeSignature;
   ui.beatUnitSelect.value = beatUnit;
   ui.beatUnitSelect.disabled = sequenceSubMode === "single-beat";
@@ -599,14 +746,15 @@ function render(): void {
   if (document.activeElement !== ui.bleedThresholdInput) {
     ui.bleedThresholdInput.value = minBleedScore.toFixed(2);
   }
-  ui.stringPurityToggle.checked = enableStringPurityCheck;
+  ui.stringPurityToggle.checked = stringPurityActive;
+  ui.stringPurityToggle.disabled = state.mode === "spectrum";
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
   syncMetronomeAnimationLoop();
 
   const centsText = state.live.cents === null ? "" : ` (${formatSigned(state.live.cents)} cents)`;
   ui.noteMetric.innerHTML = `${solfege} <span class="muted">(${scientific})${centsText}</span>`;
-  ui.bleedNoteLine.innerHTML = enableStringPurityCheck ? buildBleedNoteLine(lastFrame) : "&nbsp;";
+  ui.bleedNoteLine.innerHTML = stringPurityActive ? buildBleedNoteLine(lastFrame) : "&nbsp;";
 
   const statusText = !state.listening
     ? "Not listening"
@@ -618,13 +766,20 @@ function render(): void {
   const confText = `${(state.live.confidence * 100).toFixed(0)}%`;
   const centsLine = state.live.cents === null ? "cents: -" : `cents: ${formatSigned(state.live.cents)}`;
   ui.liveMetaLine.textContent = `${freqText} | ${confText} | ${centsLine} | ${statusText}`;
-  ui.purityMetaLine.style.display = enableStringPurityCheck ? "" : "none";
-  if (enableStringPurityCheck) {
+  ui.purityMetaLine.style.display = stringPurityActive ? "" : "none";
+  if (stringPurityActive) {
     ui.purityMetaLine.textContent = formatStringPurityLine(lastFrame);
   }
 
   if (state.mode === "live") {
     ui.captureHint.textContent = "Live Mode: intonation feedback only.";
+  } else if (state.mode === "practice") {
+    ui.captureHint.textContent = state.recording
+      ? "Practice Mode: play the highlighted note; target notes turn green or red in real time."
+      : "Practice Mode: Start Practice controls both mic and the live target check.";
+  } else if (state.mode === "spectrum") {
+    ui.captureHint.textContent =
+      "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
   } else if (sequenceSubMode === "single-beat") {
     ui.captureHint.textContent =
       "Single Beat Drill: use Start/Stop Single Beat Drill only; mic starts/stops automatically.";
@@ -637,9 +792,43 @@ function render(): void {
   }
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
+  const practiceModeActive = state.mode === "practice";
+  const spectrumModeActive = state.mode === "spectrum";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
+  ui.staff.style.display = spectrumModeActive ? "none" : "block";
+  ui.spectrumPanel.style.display = spectrumModeActive ? "block" : "none";
+  ui.spectrogramOverlay.innerHTML = spectrumModeActive
+    ? renderSpectrumOverlay(lastFrame, minBleedScore)
+    : "";
 
-  if (!singleBeatModeActive) {
+  if (spectrumModeActive) {
+    ui.staffBatchLayer.style.display = "none";
+    ui.staffBatchLayer.innerHTML = "";
+    ui.noteGroup.style.visibility = "hidden";
+    ui.ledgerLayer.innerHTML = "";
+    ui.trailLayer.innerHTML = "";
+    trailNotes.length = 0;
+    previousDisplayedSnapshot = null;
+  } else if (practiceModeActive) {
+    ui.staffBatchLayer.style.display = "block";
+    ui.staffBatchLayer.innerHTML = renderPracticePatternStaff(nowMs);
+    ui.trailLayer.innerHTML = "";
+    trailNotes.length = 0;
+    previousDisplayedSnapshot = null;
+
+    if (currentSnapshot === null) {
+      ui.noteGroup.style.visibility = "hidden";
+      ui.ledgerLayer.innerHTML = "";
+    } else {
+      ui.noteGroup.style.visibility = "visible";
+      ui.noteGroup.style.top = `${currentSnapshot.y.toFixed(1)}px`;
+      ui.noteGroup.classList.toggle("stem-up", currentSnapshot.stemDirection === "up");
+      ui.noteGroup.classList.toggle("stem-down", currentSnapshot.stemDirection === "down");
+      ui.ledgerLayer.innerHTML = currentSnapshot.ledgerYs
+        .map((lineY) => `<div class="ledger-line practice-live-ledger" style="top:${lineY.toFixed(1)}px"></div>`)
+        .join("");
+    }
+  } else if (!singleBeatModeActive) {
     ui.staffBatchLayer.style.display = "none";
     ui.staffBatchLayer.innerHTML = "";
     maybeSpawnTrail(currentSnapshot, nowMs);
@@ -668,7 +857,7 @@ function render(): void {
     previousDisplayedSnapshot = null;
   }
 
-  const showMetronome = enableVisualMetronome;
+  const showMetronome = enableVisualMetronome && state.mode !== "spectrum";
   ui.metronomeBox.style.display = showMetronome ? "block" : "none";
   if (showMetronome) {
     ui.metronomeBox.innerHTML = renderVisualMetronome(performance.now());
@@ -676,7 +865,12 @@ function render(): void {
     ui.metronomeBox.innerHTML = "";
   }
 
-  if (sequenceSubMode === "single-beat") {
+  if (state.mode === "spectrum") {
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent = "Live spectrum | log frequency scale | fixed-do reference labels";
+    ui.sequenceSummary.textContent = renderSpectrumSummary(lastFrame, minBleedScore);
+  } else if (state.mode === "sequence" && sequenceSubMode === "single-beat") {
     const targetMs = barDurationMs(sequenceSettings.bpm, sequenceSettings.timeSignature);
     const beatsInBar = beatsPerBar(sequenceSettings.timeSignature);
     ui.sequenceMeta.textContent =
@@ -684,11 +878,23 @@ function render(): void {
     ui.beatBatchBox.style.display = "block";
     ui.beatBatchBox.innerHTML = renderBeatBatchVisualization();
     ui.sequenceSummary.textContent = `${singleBeatDebug}\n\n${renderBeatDrillSummary()}`;
-  } else {
+  } else if (state.mode === "practice") {
+    const snapshot = getPracticeSnapshot(nowMs);
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent =
+      `${activePracticePattern.title} | ${practiceBpm} BPM | pitch ±${practiceTolerance.pitchCents} cents | timing ±${practiceTolerance.onsetMs} ms`;
+    ui.sequenceSummary.textContent = renderPracticeSummary(snapshot);
+  } else if (state.mode === "sequence") {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent = `${sequenceSettings.timeSignature} at ${sequenceSettings.bpm} BPM, grid ${sequenceSettings.quantization}`;
     ui.sequenceSummary.textContent = renderSequenceSummary(state.sequence);
+  } else {
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent = "Live intonation | staff placement | optional fade trail";
+    ui.sequenceSummary.textContent = "Use Live Mode for note, cents, confidence, and optional adjacent-string bleed checks.";
   }
 
   if (fadingBeatBatches.length > 0) {
@@ -706,6 +912,14 @@ function captureButtonLabel(): string {
   }
 
   return state.recording ? "Stop Phrase Capture" : "Start Phrase Capture";
+}
+
+function isStringPurityActive(): boolean {
+  return enableStringPurityCheck || state.mode === "spectrum";
+}
+
+function syncStringPurityPipeline(): void {
+  pipeline?.setStringPurityEnabled(isStringPurityActive());
 }
 
 function buildCurrentNoteSnapshot(displayedMidi: number | null): NoteSnapshot | null {
@@ -960,6 +1174,7 @@ async function onToggleListening(): Promise<void> {
     state.live = createInitialState().live;
     previousDisplayedSnapshot = null;
     trailNotes.length = 0;
+    spectrogram?.reset();
     currentBeatBatch = null;
     fadingBeatBatches.length = 0;
     singleBeatWindow = null;
@@ -994,8 +1209,8 @@ async function onToggleListening(): Promise<void> {
       micHandle = await startMic(undefined, micProfile);
     }
 
-    pipeline = startPitchPipeline(micHandle, onPitchFrame);
-    pipeline.setStringPurityEnabled(enableStringPurityCheck);
+    pipeline = startPitchPipeline(micHandle, onPitchFrame, onSpectrumFrame);
+    syncStringPurityPipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
       resetMetronomeClock();
@@ -1012,10 +1227,20 @@ async function onToggleListening(): Promise<void> {
 
 function onModeChange(event: Event): void {
   const target = event.target as HTMLSelectElement;
-  state.mode = target.value === "sequence" ? "sequence" : "live";
+  state.mode =
+    target.value === "sequence"
+      ? "sequence"
+      : target.value === "spectrum"
+        ? "spectrum"
+        : "live";
   resetMetronomeClock();
+  syncStringPurityPipeline();
 
-  if (state.mode === "live") {
+  if (state.mode === "spectrum") {
+    spectrogram?.reset();
+  }
+
+  if (state.mode !== "sequence") {
     state.recording = false;
     currentBeatBatch = null;
     fadingBeatBatches.length = 0;
@@ -1194,6 +1419,13 @@ function onPitchFrame(frame: PitchFrame): void {
   }
 
   scheduleRender();
+}
+
+function onSpectrumFrame(frame: SpectrumFrame): void {
+  if (state.mode !== "spectrum") {
+    return;
+  }
+  spectrogram?.push(frame);
 }
 
 function captureSingleBeatFrame(frame: PitchFrame): void {
