@@ -22,6 +22,23 @@ export type SpectrumFrame = {
   magnitudesDb: Float32Array;
 };
 
+export type TempoStatus =
+  | "idle"
+  | "insufficient"
+  | "play-faster"
+  | "play-slower"
+  | "on-tempo";
+
+export type TempoFrame = {
+  tMs: number;
+  targetBpm: number;
+  estimatedBpm: number | null;
+  differenceBpm: number | null;
+  confidence: number;
+  status: TempoStatus;
+  novelty: number;
+};
+
 export type SequenceSettings = {
   bpm: number;
   timeSignature: "2/2" | "2/4" | "3/4" | "4/4" | "6/8";

@@ -340,6 +340,58 @@ button.primary {
   background: #fff;
 }
 
+.practice-panel {
+  margin: 0.1rem 0 0.7rem;
+  padding: 0.65rem;
+  border: 1px solid #ddd1be;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.practice-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.2rem;
+  padding: 0.28rem 0.58rem;
+  border-radius: 8px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #1f2f2a;
+  background: #e9f4ee;
+}
+
+.practice-status.status-play-faster {
+  color: #173c2e;
+  background: #ccebd9;
+}
+
+.practice-status.status-play-slower {
+  color: #5d2e0b;
+  background: #f6dec2;
+}
+
+.practice-status.status-on-tempo {
+  color: #ffffff;
+  background: #2d6a4f;
+}
+
+.practice-status.status-insufficient,
+.practice-status.status-idle {
+  color: #53615d;
+  background: #edf0ed;
+}
+
+.practice-estimate,
+.practice-detail {
+  margin: 0.38rem 0 0;
+  font-size: 0.92rem;
+  color: #3f4d49;
+}
+
+.practice-detail {
+  color: #6b756e;
+}
+
 .staff {
   margin: 0.45rem 0 0;
   position: relative;

@@ -1,6 +1,6 @@
 import { startMic, stopMic, type MicHandle } from "./audio/mic";
 import { startPitchPipeline, type PipelineHandle } from "./audio/pipeline";
-import { type PitchFrame, type SpectrumFrame } from "./audio/types";
+import { type PitchFrame, type SpectrumFrame, type TempoFrame } from "./audio/types";
 import { LiveNoteTracker, initialLiveSettings } from "./modes/live-mode";
 import {
   SequenceCollector,
@@ -85,6 +85,7 @@ const sequenceSettings = initialSequenceSettings();
 const liveSettings = initialLiveSettings();
 const liveTracker = new LiveNoteTracker(liveSettings, 30_000);
 const collector = new SequenceCollector(sequenceSettings);
+state.practice.targetBpm = sequenceSettings.bpm;
 
 const TRAIL_DURATION_MS = 1400;
 const TRAIL_START_LEFT_PCT = 58;
@@ -94,6 +95,7 @@ const BATCH_FADE_MS = 1700;
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
 let lastFrame: PitchFrame | null = null;
+let lastTempoFrame: TempoFrame | null = null;
 let spectrogram: LiveSpectrogramRenderer | null = null;
 let renderPending = false;
 let showExactIntonation = false;
@@ -144,6 +146,10 @@ type UiRefs = {
   recordBtn: HTMLButtonElement;
   outputTitle: HTMLHeadingElement;
   liveMetronomeControls: HTMLDivElement;
+  practicePanel: HTMLDivElement;
+  practiceStatus: HTMLDivElement;
+  practiceEstimate: HTMLParagraphElement;
+  practiceDetail: HTMLParagraphElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
   liveBpmInput: HTMLInputElement;
@@ -188,6 +194,7 @@ function mountUi(): void {
         <button id="listen-btn" class="primary">Start Listening</button>
         <select id="mode-select" aria-label="Mode">
           <option value="live">Live Mode</option>
+          <option value="practice">Practice Mode</option>
           <option value="sequence">Sequence Mode</option>
           <option value="spectrum">Spectrum Mode</option>
         </select>
@@ -228,7 +235,7 @@ function mountUi(): void {
         <section class="card">
           <h2 id="output-title">Sequence Output</h2>
           <div id="live-metronome-controls" class="sequence-controls live-metro-controls">
-            <label>Live BPM
+            <label>Target BPM
               <span class="live-bpm-stepper">
                 <input id="live-bpm-input" class="live-bpm-input" type="number" min="30" max="240" step="1" value="80" />
                 <span class="live-bpm-arrows">
@@ -237,6 +244,11 @@ function mountUi(): void {
                 </span>
               </span>
             </label>
+          </div>
+          <div id="practice-panel" class="practice-panel">
+            <div id="practice-status" class="practice-status status-idle">-</div>
+            <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
+            <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
           </div>
           <div id="sequence-controls" class="sequence-controls">
             <label>Submode
@@ -307,6 +319,10 @@ function mountUi(): void {
   const recordBtn = appRoot.querySelector<HTMLButtonElement>("#record-btn");
   const outputTitle = appRoot.querySelector<HTMLHeadingElement>("#output-title");
   const liveMetronomeControls = appRoot.querySelector<HTMLDivElement>("#live-metronome-controls");
+  const practicePanel = appRoot.querySelector<HTMLDivElement>("#practice-panel");
+  const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
+  const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
+  const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
@@ -346,6 +362,10 @@ function mountUi(): void {
     !recordBtn ||
     !outputTitle ||
     !liveMetronomeControls ||
+    !practicePanel ||
+    !practiceStatus ||
+    !practiceEstimate ||
+    !practiceDetail ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
     !liveBpmInput ||
@@ -388,6 +408,10 @@ function mountUi(): void {
     recordBtn,
     outputTitle,
     liveMetronomeControls,
+    practicePanel,
+    practiceStatus,
+    practiceEstimate,
+    practiceDetail,
     sequenceControls,
     sequenceSubmodeSelect,
     liveBpmInput,
@@ -464,6 +488,9 @@ function mountUi(): void {
       return;
     }
     sequenceSettings.bpm = nextBpm;
+    resetPracticeEstimate(nextBpm);
+    pipeline?.setPracticeTargetBpm(nextBpm);
+    pipeline?.resetTempo();
     collector.setSettings(sequenceSettings);
     resetMetronomeClock();
     scheduleRender();
@@ -493,6 +520,9 @@ function mountUi(): void {
       return;
     }
     sequenceSettings.bpm = nextBpm;
+    resetPracticeEstimate(nextBpm);
+    pipeline?.setPracticeTargetBpm(nextBpm);
+    pipeline?.resetTempo();
     collector.setSettings(sequenceSettings);
     resetMetronomeClock();
     scheduleRender();
@@ -612,11 +642,15 @@ function render(): void {
   ui.modeSelect.value = state.mode;
   ui.recordBtn.disabled = state.mode !== "sequence";
   ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
-  ui.liveMetronomeControls.style.display = state.mode === "live" ? "grid" : "none";
+  ui.liveMetronomeControls.style.display =
+    state.mode === "live" || state.mode === "practice" ? "grid" : "none";
+  ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
+      : state.mode === "practice"
+        ? "Practice Output"
       : state.mode === "live"
         ? "Live Output"
         : "Sequence Output";
@@ -658,6 +692,7 @@ function render(): void {
   const confText = `${(state.live.confidence * 100).toFixed(0)}%`;
   const centsLine = state.live.cents === null ? "cents: -" : `cents: ${formatSigned(state.live.cents)}`;
   ui.liveMetaLine.textContent = `${freqText} | ${confText} | ${centsLine} | ${statusText}`;
+  renderPracticePanel();
   ui.purityMetaLine.style.display = stringPurityActive ? "" : "none";
   if (stringPurityActive) {
     ui.purityMetaLine.textContent = formatStringPurityLine(lastFrame);
@@ -665,6 +700,9 @@ function render(): void {
 
   if (state.mode === "live") {
     ui.captureHint.textContent = "Live Mode: intonation feedback only.";
+  } else if (state.mode === "practice") {
+    ui.captureHint.textContent =
+      "Practice Mode: set target BPM, play a steady pulse, and watch tempo feedback.";
   } else if (state.mode === "spectrum") {
     ui.captureHint.textContent =
       "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
@@ -754,8 +792,13 @@ function render(): void {
   } else {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
-    ui.sequenceMeta.textContent = "Live intonation | staff placement | optional fade trail";
-    ui.sequenceSummary.textContent = "Use Live Mode for note, cents, confidence, and optional adjacent-string bleed checks.";
+    if (state.mode === "practice") {
+      ui.sequenceMeta.textContent = "Practice tempo | target-biased rolling estimate | bowed-string onset cautious";
+      ui.sequenceSummary.textContent = renderPracticeSummary();
+    } else {
+      ui.sequenceMeta.textContent = "Live intonation | staff placement | optional fade trail";
+      ui.sequenceSummary.textContent = "Use Live Mode for note, cents, confidence, and optional adjacent-string bleed checks.";
+    }
   }
 
   if (fadingBeatBatches.length > 0) {
@@ -773,6 +816,71 @@ function captureButtonLabel(): string {
   }
 
   return state.recording ? "Stop Phrase Capture" : "Start Phrase Capture";
+}
+
+function resetPracticeEstimate(targetBpm = sequenceSettings.bpm): void {
+  lastTempoFrame = null;
+  state.practice = {
+    targetBpm,
+    estimatedBpm: null,
+    differenceBpm: null,
+    confidence: 0,
+    status: state.listening ? "insufficient" : "idle",
+    novelty: 0,
+  };
+}
+
+function renderPracticePanel(): void {
+  if (!ui) return;
+
+  const practice = state.practice;
+  const statusLabel = practiceStatusLabel(practice.status, state.listening);
+  const statusClass = practice.status;
+  ui.practiceStatus.className = `practice-status status-${statusClass}`;
+  ui.practiceStatus.textContent = statusLabel;
+
+  const estimatedText =
+    practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
+  const diffText =
+    practice.differenceBpm === null
+      ? ""
+      : ` | ${formatSigned(practice.differenceBpm)} BPM`;
+  ui.practiceEstimate.textContent =
+    `Target ${practice.targetBpm} BPM | estimated ${estimatedText}${diffText}`;
+  ui.practiceDetail.textContent =
+    `Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
+}
+
+function renderPracticeSummary(): string {
+  const practice = state.practice;
+  const estimate = practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
+  const diff = practice.differenceBpm === null ? "-" : `${formatSigned(practice.differenceBpm)} BPM`;
+  return [
+    `Target BPM: ${practice.targetBpm}`,
+    `Estimated BPM: ${estimate}`,
+    `Difference: ${diff}`,
+    `Feedback: ${practiceStatusLabel(practice.status, state.listening)}`,
+    `Confidence: ${(practice.confidence * 100).toFixed(0)}%`,
+    "",
+    "The estimator listens for repeated changes in tone, energy, and spectrum. If the bowing is too smooth or the pulse is unclear, it will wait instead of guessing.",
+  ].join("\n");
+}
+
+function practiceStatusLabel(status: TempoFrame["status"], listening: boolean): string {
+  if (!listening) return "Start listening";
+  switch (status) {
+    case "on-tempo":
+      return "On tempo";
+    case "play-faster":
+      return "Play faster";
+    case "play-slower":
+      return "Play slower";
+    case "insufficient":
+      return "Finding pulse";
+    case "idle":
+    default:
+      return "Start playing";
+  }
 }
 
 function isStringPurityActive(): boolean {
@@ -906,8 +1014,8 @@ function renderVisualMetronome(nowMs: number): string {
 
   const beatInBar = beatIndex + 1;
   const label =
-    state.mode === "live"
-      ? `Live | beat ${beatInBar}/${beats.length} | ${sequenceSettings.bpm} BPM`
+    state.mode === "live" || state.mode === "practice"
+      ? `${state.mode === "practice" ? "Practice" : "Live"} | beat ${beatInBar}/${beats.length} | ${sequenceSettings.bpm} BPM`
       : `${sequenceSettings.timeSignature} | beat ${beatInBar}/${beats.length} | ${sequenceSettings.bpm} BPM`;
 
   return `<div class="metro-row">${pulseHtml}</div><div class="metro-label">${label}</div>`;
@@ -940,14 +1048,14 @@ function syncMetronomeAnimationLoop(): void {
 }
 
 function metronomePatternForMode(): Array<"strong" | "medium" | "weak"> {
-  if (state.mode === "live") {
+  if (state.mode === "live" || state.mode === "practice") {
     return ["strong"];
   }
   return metronomeBeatPattern(sequenceSettings.timeSignature);
 }
 
 function metronomeBeatDurationMs(): number {
-  if (state.mode === "live") {
+  if (state.mode === "live" || state.mode === "practice") {
     return 60_000 / sequenceSettings.bpm;
   }
   return beatDurationForTimeSignature(sequenceSettings.bpm, sequenceSettings.timeSignature);
@@ -1031,8 +1139,14 @@ async function onToggleListening(): Promise<void> {
     state.listening = false;
     state.recording = false;
     lastFrame = null;
+    lastTempoFrame = null;
     liveTracker.reset();
-    state.live = createInitialState().live;
+    const freshState = createInitialState();
+    state.live = freshState.live;
+    state.practice = {
+      ...freshState.practice,
+      targetBpm: sequenceSettings.bpm,
+    };
     previousDisplayedSnapshot = null;
     trailNotes.length = 0;
     spectrogram?.reset();
@@ -1070,7 +1184,13 @@ async function onToggleListening(): Promise<void> {
       micHandle = await startMic(undefined, micProfile);
     }
 
-    pipeline = startPitchPipeline(micHandle, onPitchFrame, onSpectrumFrame);
+    pipeline = startPitchPipeline(
+      micHandle,
+      onPitchFrame,
+      onSpectrumFrame,
+      onTempoFrame,
+      sequenceSettings.bpm,
+    );
     syncStringPurityPipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
@@ -1093,8 +1213,11 @@ function onModeChange(event: Event): void {
       ? "sequence"
       : target.value === "spectrum"
         ? "spectrum"
-        : "live";
+        : target.value === "practice"
+          ? "practice"
+          : "live";
   resetMetronomeClock();
+  pipeline?.resetTempo();
   syncStringPurityPipeline();
 
   if (state.mode === "spectrum") {
@@ -1287,6 +1410,22 @@ function onSpectrumFrame(frame: SpectrumFrame): void {
     return;
   }
   spectrogram?.push(frame);
+}
+
+function onTempoFrame(frame: TempoFrame): void {
+  lastTempoFrame = frame;
+  state.practice = {
+    targetBpm: frame.targetBpm,
+    estimatedBpm: frame.estimatedBpm,
+    differenceBpm: frame.differenceBpm,
+    confidence: frame.confidence,
+    status: frame.status,
+    novelty: frame.novelty,
+  };
+
+  if (state.mode === "practice") {
+    scheduleRender();
+  }
 }
 
 function captureSingleBeatFrame(frame: PitchFrame): void {

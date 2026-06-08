@@ -1,18 +1,26 @@
-import type { PitchFrame, SpectrumFrame } from "./types";
+import type { PitchFrame, SpectrumFrame, TempoFrame } from "./types";
 import { AutoCorrelationPitchEstimator } from "./pitch-estimator";
+import { TempoEstimator } from "./tempo-estimator";
 import type { MicHandle } from "./mic";
 
 export type PipelineHandle = {
   stop: () => void;
   setStringPurityEnabled: (enabled: boolean) => void;
+  setPracticeTargetBpm: (bpm: number) => void;
+  resetTempo: () => void;
 };
 
 export function startPitchPipeline(
   mic: MicHandle,
   onFrame: (frame: PitchFrame) => void,
   onSpectrumFrame?: (frame: SpectrumFrame) => void,
+  onTempoFrame?: (frame: TempoFrame) => void,
+  initialPracticeTargetBpm = 80,
 ): PipelineHandle {
   const estimator = new AutoCorrelationPitchEstimator(mic.context.sampleRate);
+  const tempoEstimator = new TempoEstimator(mic.context.sampleRate, mic.analyser.fftSize, {
+    targetBpm: initialPracticeTargetBpm,
+  });
   const buffer = new Float32Array(mic.analyser.fftSize);
   const spectrumBuffer = new Float32Array(mic.analyser.frequencyBinCount);
 
@@ -24,8 +32,13 @@ export function startPitchPipeline(
     mic.analyser.getFloatTimeDomainData(buffer);
     const frame = estimator.process(buffer, performance.now());
     onFrame(frame);
-    if (onSpectrumFrame) {
+    if (onSpectrumFrame || onTempoFrame) {
       mic.analyser.getFloatFrequencyData(spectrumBuffer);
+    }
+    if (onTempoFrame) {
+      onTempoFrame(tempoEstimator.process(buffer, spectrumBuffer, frame, frame.tMs));
+    }
+    if (onSpectrumFrame) {
       onSpectrumFrame({
         tMs: frame.tMs,
         sampleRate: mic.context.sampleRate,
@@ -49,6 +62,12 @@ export function startPitchPipeline(
     },
     setStringPurityEnabled: (enabled: boolean) => {
       estimator.setStringPurityEnabled(enabled);
+    },
+    setPracticeTargetBpm: (bpm: number) => {
+      tempoEstimator.setTargetBpm(bpm);
+    },
+    resetTempo: () => {
+      tempoEstimator.reset();
     },
   };
 }
