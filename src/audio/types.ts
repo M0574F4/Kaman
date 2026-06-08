@@ -51,6 +51,7 @@ export type TempoDebugFrame = {
   rms: number;
   noiseFloorRms: number;
   gateRms: number;
+  sustainGateRms: number;
   active: boolean;
   activeRatio: number;
   recentActiveRatio: number;

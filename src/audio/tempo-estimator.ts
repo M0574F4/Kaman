@@ -12,6 +12,8 @@ type TempoEstimatorOptions = {
   onsetRefractoryMs: number;
   minSignalRms: number;
   noiseGateRatio: number;
+  sustainGateRatio: number;
+  minSustainRms: number;
 };
 
 const DEFAULT_OPTIONS: TempoEstimatorOptions = {
@@ -26,6 +28,8 @@ const DEFAULT_OPTIONS: TempoEstimatorOptions = {
   onsetRefractoryMs: 95,
   minSignalRms: 0.012,
   noiseGateRatio: 3.2,
+  sustainGateRatio: 1.45,
+  minSustainRms: 0.0035,
 };
 
 type NoveltySample = {
@@ -56,6 +60,7 @@ export class TempoEstimator {
   private smoothedEstimate: TempoEstimate | null = null;
   private noiseFloorRms = 0.004;
   private lastActiveMs: number | null = null;
+  private lastStrongSignalMs: number | null = null;
   private lastRms = 0;
   private lastActive = false;
   private lastActiveRatio = 0;
@@ -86,6 +91,7 @@ export class TempoEstimator {
     this.smoothedEstimate = null;
     this.noiseFloorRms = 0.004;
     this.lastActiveMs = null;
+    this.lastStrongSignalMs = null;
     this.lastRms = 0;
     this.lastActive = false;
     this.lastActiveRatio = 0;
@@ -101,7 +107,7 @@ export class TempoEstimator {
     tMs: number,
   ): TempoFrame {
     const rms = rootMeanSquare(timeDomain);
-    const active = this.isSignalActive(rms, pitchFrame);
+    const active = this.isSignalActive(rms, pitchFrame, tMs);
     this.lastRms = rms;
     this.lastActive = active;
     const novelty = this.computeNovelty(timeDomain, spectrumDb, pitchFrame, rms, active);
@@ -183,17 +189,28 @@ export class TempoEstimator {
     return clamp01(rawNovelty - this.smoothedNovelty * 0.35);
   }
 
-  private isSignalActive(rms: number, pitchFrame: PitchFrame): boolean {
+  private isSignalActive(rms: number, pitchFrame: PitchFrame, tMs: number): boolean {
     const hasConfidentPitch =
       pitchFrame.midiFloat !== null &&
       pitchFrame.freqHz !== null &&
       pitchFrame.confidence >= 0.32;
     if (hasConfidentPitch) {
+      this.lastStrongSignalMs = tMs;
       return true;
     }
 
     const gate = Math.max(this.opts.minSignalRms, this.noiseFloorRms * this.opts.noiseGateRatio);
-    return rms >= gate;
+    if (rms >= gate) {
+      this.lastStrongSignalMs = tMs;
+      return true;
+    }
+
+    const sustainGate = Math.max(this.opts.minSustainRms, this.noiseFloorRms * this.opts.sustainGateRatio);
+    const targetPeriodMs = 60_000 / this.opts.targetBpm;
+    const holdMs = clamp(targetPeriodMs * 1.65, 950, 2600);
+    const recentlyStrong =
+      this.lastStrongSignalMs !== null && tMs - this.lastStrongSignalMs <= holdMs;
+    return recentlyStrong && rms >= sustainGate;
   }
 
   private updateNoiseFloor(rms: number, pitchFrame: PitchFrame): void {
@@ -291,7 +308,8 @@ export class TempoEstimator {
     this.lastAutocorrelationEstimate = null;
     this.lastPeakEstimate = null;
 
-    if (this.lastActiveMs === null || tMs - this.lastActiveMs > 900) {
+    const inactiveResetMs = clamp((60_000 / this.opts.targetBpm) * 1.45, 900, 2600);
+    if (this.lastActiveMs === null || tMs - this.lastActiveMs > inactiveResetMs) {
       this.smoothedEstimate = null;
       this.lastActiveRatio = 0;
       this.lastRecentActiveRatio = 0;
@@ -343,21 +361,41 @@ export class TempoEstimator {
 
   private buildDebugFrame(tMs: number): TempoDebugFrame {
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
-    const peaks = pickOnsetPeaks(activeSamples, this.opts.onsetRefractoryMs);
+    const peaks = pickOnsetPeaks(activeSamples, this.onsetRefractoryMsForTarget());
     const pointStep = Math.max(1, Math.ceil(activeSamples.length / 96));
-    const points = activeSamples
-      .filter((_, index) => index % pointStep === 0)
-      .map((sample) => ({
-        ageMs: tMs - sample.tMs,
-        value: sample.value,
-        active: sample.active,
-        peak: peaks.some((peak) => Math.abs(peak.tMs - sample.tMs) <= this.opts.sampleStepMs * pointStep * 0.6),
-      }));
+    const decimated = activeSamples.filter((_, index) => index % pointStep === 0);
+    const peakPointIndexes = new Set<number>();
+    for (const peak of peaks) {
+      let closestIndex = -1;
+      let closestDistance = Infinity;
+      for (let i = 0; i < decimated.length; i += 1) {
+        const distance = Math.abs(decimated[i].tMs - peak.tMs);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestIndex = i;
+        }
+      }
+      if (closestIndex >= 0) {
+        peakPointIndexes.add(closestIndex);
+      }
+    }
+
+    const points = decimated.map((sample, index) => ({
+      ageMs: tMs - sample.tMs,
+      value: sample.value,
+      active: sample.active,
+      peak: peakPointIndexes.has(index),
+    }));
+    const sustainGateRms = Math.max(
+      this.opts.minSustainRms,
+      this.noiseFloorRms * this.opts.sustainGateRatio,
+    );
 
     return {
       rms: this.lastRms,
       noiseFloorRms: this.noiseFloorRms,
       gateRms: Math.max(this.opts.minSignalRms, this.noiseFloorRms * this.opts.noiseGateRatio),
+      sustainGateRms,
       active: this.lastActive,
       activeRatio: this.lastActiveRatio,
       recentActiveRatio: this.lastRecentActiveRatio,
@@ -398,7 +436,7 @@ export class TempoEstimator {
   }
 
   private estimateFromOnsetPeaks(samples: NoveltySample[]): TempoEstimate | null {
-    const peaks = pickOnsetPeaks(samples, this.opts.onsetRefractoryMs);
+    const peaks = pickOnsetPeaks(samples, this.onsetRefractoryMsForTarget());
     if (peaks.length < 3) {
       return null;
     }
@@ -473,6 +511,11 @@ export class TempoEstimator {
     }
 
     return clamp01(score / Math.max(2.5, peaks.length * 1.3));
+  }
+
+  private onsetRefractoryMsForTarget(): number {
+    const targetPeriodMs = 60_000 / this.opts.targetBpm;
+    return clamp(targetPeriodMs * 0.42, this.opts.onsetRefractoryMs, 260);
   }
 
   private stabilizeEstimate(next: TempoEstimate): TempoEstimate {

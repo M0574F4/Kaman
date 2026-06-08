@@ -468,6 +468,10 @@ button.primary {
   background: #7f8b8c;
 }
 
+.practice-level-marker.sustain {
+  background: #c18a16;
+}
+
 .practice-trace-wrap {
   margin-top: 0.55rem;
 }

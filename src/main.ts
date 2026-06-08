@@ -883,6 +883,7 @@ function renderPracticeDebug(): string {
 
   const signalPct = rmsToDisplayPct(debug.rms);
   const gatePct = rmsToDisplayPct(debug.gateRms);
+  const sustainPct = rmsToDisplayPct(debug.sustainGateRms);
   const noisePct = rmsToDisplayPct(debug.noiseFloorRms);
   const autoBpm = debug.autocorrelationBpm === null ? "-" : Math.round(debug.autocorrelationBpm).toString();
   const peakBpm = debug.peakBpm === null ? "-" : Math.round(debug.peakBpm).toString();
@@ -892,10 +893,11 @@ function renderPracticeDebug(): string {
       <div class="practice-debug-cell">
         <span>Gate</span>
         <strong>${debug.active ? "open" : "closed"}</strong>
-        <small>signal ${formatRms(debug.rms)} | gate ${formatRms(debug.gateRms)} | floor ${formatRms(debug.noiseFloorRms)}</small>
+        <small>signal ${formatRms(debug.rms)} | open ${formatRms(debug.gateRms)} | sustain ${formatRms(debug.sustainGateRms)} | floor ${formatRms(debug.noiseFloorRms)}</small>
         <div class="practice-level">
           <div class="practice-level-fill" style="width:${signalPct.toFixed(1)}%"></div>
           <div class="practice-level-marker gate" style="left:${gatePct.toFixed(1)}%"></div>
+          <div class="practice-level-marker sustain" style="left:${sustainPct.toFixed(1)}%"></div>
           <div class="practice-level-marker noise" style="left:${noisePct.toFixed(1)}%"></div>
         </div>
       </div>
