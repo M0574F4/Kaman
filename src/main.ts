@@ -7,14 +7,6 @@ import {
   initialSequenceSettings,
 } from "./modes/sequence-mode";
 import {
-  PRACTICE_PATTERNS,
-  PracticeSession,
-  initialPracticeTolerance,
-  type PracticePattern,
-  type PracticeSnapshot,
-  type PracticeTolerance,
-} from "./modes/practice-mode";
-import {
   LiveSpectrogramRenderer,
   renderSpectrumOverlay,
   renderSpectrumSummary,
@@ -91,7 +83,6 @@ type BeatBatch = {
 const state = createInitialState();
 const sequenceSettings = initialSequenceSettings();
 const liveSettings = initialLiveSettings();
-const practiceTolerance = initialPracticeTolerance();
 const liveTracker = new LiveNoteTracker(liveSettings, 30_000);
 const collector = new SequenceCollector(sequenceSettings);
 
@@ -112,10 +103,6 @@ let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
 let sequenceSubMode: SequenceSubMode = "single-beat";
-let activePracticePattern: PracticePattern = PRACTICE_PATTERNS[0];
-let practiceBpm = activePracticePattern.bpmDefault;
-let practiceSession: PracticeSession | null = null;
-let lastPracticeSnapshot: PracticeSnapshot | null = null;
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
 let beatAttemptId = 1;
@@ -158,12 +145,7 @@ type UiRefs = {
   outputTitle: HTMLHeadingElement;
   liveMetronomeControls: HTMLDivElement;
   sequenceControls: HTMLDivElement;
-  practiceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
-  practicePatternSelect: HTMLSelectElement;
-  practiceBpmInput: HTMLInputElement;
-  practicePitchToleranceInput: HTMLInputElement;
-  practiceTimingToleranceInput: HTMLInputElement;
   liveBpmInput: HTMLInputElement;
   liveBpmUpBtn: HTMLButtonElement;
   liveBpmDownBtn: HTMLButtonElement;
@@ -207,7 +189,6 @@ function mountUi(): void {
         <select id="mode-select" aria-label="Mode">
           <option value="live">Live Mode</option>
           <option value="sequence">Sequence Mode</option>
-          <option value="practice">Practice Mode</option>
           <option value="spectrum">Spectrum Mode</option>
         </select>
         <button id="record-btn" disabled>Start Capture</button>
@@ -287,24 +268,6 @@ function mountUi(): void {
               <input id="tolerance-input" type="number" min="20" max="300" step="5" value="80" />
             </label>
           </div>
-          <div id="practice-controls" class="sequence-controls practice-controls">
-            <label>Pattern
-              <select id="practice-pattern-select">
-                ${PRACTICE_PATTERNS.map(
-                  (pattern) => `<option value="${pattern.id}">${pattern.title}</option>`,
-                ).join("")}
-              </select>
-            </label>
-            <label>BPM
-              <input id="practice-bpm-input" type="number" min="30" max="240" step="1" value="${practiceBpm}" />
-            </label>
-            <label>Pitch cents
-              <input id="practice-pitch-tolerance-input" type="number" min="5" max="100" step="5" value="${practiceTolerance.pitchCents}" />
-            </label>
-            <label>Timing ms
-              <input id="practice-timing-tolerance-input" type="number" min="40" max="400" step="10" value="${practiceTolerance.onsetMs}" />
-            </label>
-          </div>
           <label class="toggle-row" for="exact-pitch-toggle">
             <input id="exact-pitch-toggle" type="checkbox" />
             Show exact intonation offset on staff (unquantized live placement)
@@ -345,12 +308,7 @@ function mountUi(): void {
   const outputTitle = appRoot.querySelector<HTMLHeadingElement>("#output-title");
   const liveMetronomeControls = appRoot.querySelector<HTMLDivElement>("#live-metronome-controls");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
-  const practiceControls = appRoot.querySelector<HTMLDivElement>("#practice-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
-  const practicePatternSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-select");
-  const practiceBpmInput = appRoot.querySelector<HTMLInputElement>("#practice-bpm-input");
-  const practicePitchToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-pitch-tolerance-input");
-  const practiceTimingToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-timing-tolerance-input");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
   const liveBpmUpBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-up");
   const liveBpmDownBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-down");
@@ -389,12 +347,7 @@ function mountUi(): void {
     !outputTitle ||
     !liveMetronomeControls ||
     !sequenceControls ||
-    !practiceControls ||
     !sequenceSubmodeSelect ||
-    !practicePatternSelect ||
-    !practiceBpmInput ||
-    !practicePitchToleranceInput ||
-    !practiceTimingToleranceInput ||
     !liveBpmInput ||
     !liveBpmUpBtn ||
     !liveBpmDownBtn ||
@@ -436,12 +389,7 @@ function mountUi(): void {
     outputTitle,
     liveMetronomeControls,
     sequenceControls,
-    practiceControls,
     sequenceSubmodeSelect,
-    practicePatternSelect,
-    practiceBpmInput,
-    practicePitchToleranceInput,
-    practiceTimingToleranceInput,
     liveBpmInput,
     liveBpmUpBtn,
     liveBpmDownBtn,
@@ -483,52 +431,6 @@ function mountUi(): void {
 
   recordBtn.addEventListener("click", () => {
     void onToggleRecording();
-  });
-
-  practicePatternSelect.addEventListener("change", (event) => {
-    const target = event.target as HTMLSelectElement;
-    const nextPattern =
-      PRACTICE_PATTERNS.find((pattern) => pattern.id === target.value) ?? PRACTICE_PATTERNS[0];
-    activePracticePattern = nextPattern;
-    practiceBpm = nextPattern.bpmDefault;
-    practiceSession = null;
-    lastPracticeSnapshot = null;
-    state.recording = false;
-    resetMetronomeClock();
-    scheduleRender();
-  });
-
-  practiceBpmInput.addEventListener("input", (event) => {
-    const target = event.target as HTMLInputElement;
-    const parsed = parseInt(target.value || String(activePracticePattern.bpmDefault), 10);
-    if (!Number.isFinite(parsed)) return;
-    practiceBpm = clamp(parsed, 30, 240);
-    resetMetronomeClock();
-    scheduleRender();
-  });
-
-  practiceBpmInput.addEventListener("change", (event) => {
-    const target = event.target as HTMLInputElement;
-    const parsed = parseInt(target.value || String(activePracticePattern.bpmDefault), 10);
-    practiceBpm = Number.isFinite(parsed) ? clamp(parsed, 30, 240) : activePracticePattern.bpmDefault;
-    target.value = String(practiceBpm);
-    resetMetronomeClock();
-    scheduleRender();
-  });
-
-  practicePitchToleranceInput.addEventListener("change", (event) => {
-    const target = event.target as HTMLInputElement;
-    practiceTolerance.pitchCents = clamp(parseInt(target.value || "35", 10), 5, 100);
-    target.value = String(practiceTolerance.pitchCents);
-    scheduleRender();
-  });
-
-  practiceTimingToleranceInput.addEventListener("change", (event) => {
-    const target = event.target as HTMLInputElement;
-    practiceTolerance.onsetMs = clamp(parseInt(target.value || "140", 10), 40, 400);
-    practiceTolerance.durationMs = Math.max(120, practiceTolerance.onsetMs);
-    target.value = String(practiceTolerance.onsetMs);
-    scheduleRender();
   });
 
   sequenceSubmodeSelect.addEventListener("change", (event) => {
@@ -709,16 +611,12 @@ function render(): void {
   ui.listenBtn.style.display = state.mode === "sequence" ? "none" : "";
   ui.modeSelect.value = state.mode;
   ui.recordBtn.disabled = state.mode !== "sequence";
-  ui.recordBtn.disabled = state.mode !== "sequence" && state.mode !== "practice";
-  ui.recordBtn.style.display = state.mode === "sequence" || state.mode === "practice" ? "" : "none";
+  ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
   ui.liveMetronomeControls.style.display = state.mode === "live" ? "grid" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
-  ui.practiceControls.style.display = state.mode === "practice" ? "grid" : "none";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
-      : state.mode === "practice"
-        ? "Practice Output"
       : state.mode === "live"
         ? "Live Output"
         : "Sequence Output";
@@ -731,12 +629,6 @@ function render(): void {
   if (activeElement !== ui.bpmInput) {
     ui.bpmInput.value = String(sequenceSettings.bpm);
   }
-  ui.practicePatternSelect.value = activePracticePattern.id;
-  if (activeElement !== ui.practiceBpmInput) {
-    ui.practiceBpmInput.value = String(practiceBpm);
-  }
-  ui.practicePitchToleranceInput.value = String(practiceTolerance.pitchCents);
-  ui.practiceTimingToleranceInput.value = String(practiceTolerance.onsetMs);
   ui.timeSignatureSelect.value = sequenceSettings.timeSignature;
   ui.beatUnitSelect.value = beatUnit;
   ui.beatUnitSelect.disabled = sequenceSubMode === "single-beat";
@@ -773,10 +665,6 @@ function render(): void {
 
   if (state.mode === "live") {
     ui.captureHint.textContent = "Live Mode: intonation feedback only.";
-  } else if (state.mode === "practice") {
-    ui.captureHint.textContent = state.recording
-      ? "Practice Mode: play the highlighted note; target notes turn green or red in real time."
-      : "Practice Mode: Start Practice controls both mic and the live target check.";
   } else if (state.mode === "spectrum") {
     ui.captureHint.textContent =
       "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
@@ -792,7 +680,6 @@ function render(): void {
   }
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
-  const practiceModeActive = state.mode === "practice";
   const spectrumModeActive = state.mode === "spectrum";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
   ui.staff.style.display = spectrumModeActive ? "none" : "block";
@@ -809,25 +696,6 @@ function render(): void {
     ui.trailLayer.innerHTML = "";
     trailNotes.length = 0;
     previousDisplayedSnapshot = null;
-  } else if (practiceModeActive) {
-    ui.staffBatchLayer.style.display = "block";
-    ui.staffBatchLayer.innerHTML = renderPracticePatternStaff(nowMs);
-    ui.trailLayer.innerHTML = "";
-    trailNotes.length = 0;
-    previousDisplayedSnapshot = null;
-
-    if (currentSnapshot === null) {
-      ui.noteGroup.style.visibility = "hidden";
-      ui.ledgerLayer.innerHTML = "";
-    } else {
-      ui.noteGroup.style.visibility = "visible";
-      ui.noteGroup.style.top = `${currentSnapshot.y.toFixed(1)}px`;
-      ui.noteGroup.classList.toggle("stem-up", currentSnapshot.stemDirection === "up");
-      ui.noteGroup.classList.toggle("stem-down", currentSnapshot.stemDirection === "down");
-      ui.ledgerLayer.innerHTML = currentSnapshot.ledgerYs
-        .map((lineY) => `<div class="ledger-line practice-live-ledger" style="top:${lineY.toFixed(1)}px"></div>`)
-        .join("");
-    }
   } else if (!singleBeatModeActive) {
     ui.staffBatchLayer.style.display = "none";
     ui.staffBatchLayer.innerHTML = "";
@@ -878,13 +746,6 @@ function render(): void {
     ui.beatBatchBox.style.display = "block";
     ui.beatBatchBox.innerHTML = renderBeatBatchVisualization();
     ui.sequenceSummary.textContent = `${singleBeatDebug}\n\n${renderBeatDrillSummary()}`;
-  } else if (state.mode === "practice") {
-    const snapshot = getPracticeSnapshot(nowMs);
-    ui.beatBatchBox.style.display = "none";
-    ui.beatBatchBox.innerHTML = "";
-    ui.sequenceMeta.textContent =
-      `${activePracticePattern.title} | ${practiceBpm} BPM | pitch ±${practiceTolerance.pitchCents} cents | timing ±${practiceTolerance.onsetMs} ms`;
-    ui.sequenceSummary.textContent = renderPracticeSummary(snapshot);
   } else if (state.mode === "sequence") {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
