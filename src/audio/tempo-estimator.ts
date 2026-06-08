@@ -10,6 +10,8 @@ type TempoEstimatorOptions = {
   tolerancePct: number;
   minConfidence: number;
   onsetRefractoryMs: number;
+  minSignalRms: number;
+  noiseGateRatio: number;
 };
 
 const DEFAULT_OPTIONS: TempoEstimatorOptions = {
@@ -22,11 +24,14 @@ const DEFAULT_OPTIONS: TempoEstimatorOptions = {
   tolerancePct: 0.055,
   minConfidence: 0.16,
   onsetRefractoryMs: 95,
+  minSignalRms: 0.012,
+  noiseGateRatio: 3.2,
 };
 
 type NoveltySample = {
   tMs: number;
   value: number;
+  active: boolean;
 };
 
 type TempoEstimate = {
@@ -49,6 +54,8 @@ export class TempoEstimator {
   private smoothedNovelty = 0;
   private samples: NoveltySample[] = [];
   private smoothedEstimate: TempoEstimate | null = null;
+  private noiseFloorRms = 0.004;
+  private lastActiveMs: number | null = null;
 
   constructor(
     private readonly sampleRate: number,
@@ -71,6 +78,8 @@ export class TempoEstimator {
     this.smoothedNovelty = 0;
     this.samples = [];
     this.smoothedEstimate = null;
+    this.noiseFloorRms = 0.004;
+    this.lastActiveMs = null;
   }
 
   process(
@@ -79,8 +88,13 @@ export class TempoEstimator {
     pitchFrame: PitchFrame,
     tMs: number,
   ): TempoFrame {
-    const novelty = this.computeNovelty(timeDomain, spectrumDb, pitchFrame);
-    this.pushNoveltySample(tMs, novelty);
+    const rms = rootMeanSquare(timeDomain);
+    const active = this.isSignalActive(rms, pitchFrame);
+    const novelty = this.computeNovelty(timeDomain, spectrumDb, pitchFrame, rms, active);
+    this.pushNoveltySample(tMs, novelty, active);
+    if (active) {
+      this.lastActiveMs = tMs;
+    }
 
     const estimate = this.estimateTempo(tMs);
     if (!estimate) {
@@ -120,8 +134,23 @@ export class TempoEstimator {
     timeDomain: Float32Array,
     spectrumDb: Float32Array,
     pitchFrame: PitchFrame,
+    rms: number,
+    active: boolean,
   ): number {
-    const rms = rootMeanSquare(timeDomain);
+    if (!active) {
+      this.updateNoiseFloor(rms, pitchFrame);
+      this.previousRms = rms;
+      this.previousSpectrum =
+        this.previousSpectrum && this.previousSpectrum.length === spectrumDb.length
+          ? this.previousSpectrum
+          : new Float32Array(spectrumDb.length);
+      this.previousSpectrum.set(spectrumDb);
+      this.previousMidiFloat = null;
+      this.previousPitchWasPresent = false;
+      this.smoothedNovelty *= 0.86;
+      return 0;
+    }
+
     const energyNovelty =
       this.previousRms === null
         ? 0
@@ -135,6 +164,30 @@ export class TempoEstimator {
     this.smoothedNovelty = this.smoothedNovelty * 0.72 + rawNovelty * 0.28;
 
     return clamp01(rawNovelty - this.smoothedNovelty * 0.35);
+  }
+
+  private isSignalActive(rms: number, pitchFrame: PitchFrame): boolean {
+    const hasConfidentPitch =
+      pitchFrame.midiFloat !== null &&
+      pitchFrame.freqHz !== null &&
+      pitchFrame.confidence >= 0.32;
+    if (hasConfidentPitch) {
+      return true;
+    }
+
+    const gate = Math.max(this.opts.minSignalRms, this.noiseFloorRms * this.opts.noiseGateRatio);
+    return rms >= gate;
+  }
+
+  private updateNoiseFloor(rms: number, pitchFrame: PitchFrame): void {
+    const hasPitch = pitchFrame.midiFloat !== null && pitchFrame.confidence >= 0.28;
+    if (hasPitch) {
+      return;
+    }
+
+    const smoothing = rms < this.noiseFloorRms ? 0.08 : 0.015;
+    this.noiseFloorRms = this.noiseFloorRms * (1 - smoothing) + rms * smoothing;
+    this.noiseFloorRms = clamp(this.noiseFloorRms, 0.0015, 0.025);
   }
 
   private computeSpectralFlux(spectrumDb: Float32Array): number {
@@ -187,9 +240,9 @@ export class TempoEstimator {
     return novelty;
   }
 
-  private pushNoveltySample(tMs: number, novelty: number): void {
+  private pushNoveltySample(tMs: number, novelty: number, active: boolean): void {
     if (this.lastSampleMs === null) {
-      this.samples.push({ tMs, value: novelty });
+      this.samples.push({ tMs, value: novelty, active });
       this.lastSampleMs = tMs;
       return;
     }
@@ -199,14 +252,14 @@ export class TempoEstimator {
     }
 
     if (tMs - this.lastSampleMs > 500) {
-      this.samples.push({ tMs, value: novelty });
+      this.samples.push({ tMs, value: novelty, active });
       this.lastSampleMs = tMs;
       return;
     }
 
     let nextSampleMs = this.lastSampleMs + this.opts.sampleStepMs;
     while (nextSampleMs <= tMs) {
-      this.samples.push({ tMs: nextSampleMs, value: novelty });
+      this.samples.push({ tMs: nextSampleMs, value: novelty, active });
       this.lastSampleMs = nextSampleMs;
       nextSampleMs += this.opts.sampleStepMs;
     }
@@ -218,6 +271,11 @@ export class TempoEstimator {
   }
 
   private estimateTempo(tMs: number): TempoEstimate | null {
+    if (this.lastActiveMs === null || tMs - this.lastActiveMs > 900) {
+      this.smoothedEstimate = null;
+      return null;
+    }
+
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
     if (activeSamples.length < 40) {
       return null;
@@ -225,6 +283,16 @@ export class TempoEstimator {
 
     const spanMs = activeSamples[activeSamples.length - 1].tMs - activeSamples[0].tMs;
     if (spanMs < this.opts.minWindowMs) {
+      return null;
+    }
+
+    const recentSamples = activeSamples.filter((sample) => tMs - sample.tMs <= 1800);
+    const recentActiveCount = recentSamples.filter((sample) => sample.active).length;
+    const activeCount = activeSamples.filter((sample) => sample.active).length;
+    const activeRatio = activeCount / activeSamples.length;
+    const recentActiveRatio = recentSamples.length === 0 ? 0 : recentActiveCount / recentSamples.length;
+    if (activeRatio < 0.18 || recentActiveRatio < 0.16 || recentActiveCount < 8) {
+      this.smoothedEstimate = null;
       return null;
     }
 
