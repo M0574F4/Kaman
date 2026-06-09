@@ -407,6 +407,14 @@ button.primary {
   border-color: #5d2e0b;
 }
 
+.practice-pattern-select {
+  width: 7.2rem;
+  min-width: 7.2rem;
+  padding: 0.44rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.86rem;
+}
+
 .practice-pattern-copy {
   min-width: 0;
   display: flex;
@@ -848,10 +856,6 @@ button.primary {
 }
 
 .practice-pattern-note {
-  position: absolute;
-  left: 50%;
-  width: 26px;
-  height: 20px;
   transform: translate(-50%, -50%) scale(1);
   transform-origin: center;
   transition: transform 110ms ease, filter 110ms ease;
@@ -860,25 +864,6 @@ button.primary {
 .practice-pattern-note.active {
   transform: translate(-50%, -50%) scale(1.1);
   filter: drop-shadow(0 0 5px rgba(27, 67, 50, 0.3));
-}
-
-.practice-pattern-note-head {
-  position: absolute;
-  left: 4px;
-  top: 4px;
-  width: 18px;
-  height: 12px;
-  border-radius: 50%;
-  background: #111111;
-  transform: rotate(-18deg);
-}
-
-.practice-pattern-note.status-correct .practice-pattern-note-head {
-  background: #2d6a4f;
-}
-
-.practice-pattern-note.status-wrong .practice-pattern-note-head {
-  background: #b00020;
 }
 
 .practice-pattern-ledger-line {
@@ -981,6 +966,21 @@ button.primary {
   height: 12px;
   left: 8px;
   top: 6px;
+}
+
+.staff-batch-note.practice-pattern-note .staff-batch-note-head {
+  background: #fffef9;
+  border-color: #111111;
+}
+
+.staff-batch-note.practice-pattern-note.status-correct .staff-batch-note-head {
+  border-color: #2d6a4f;
+  background: #e9f4ee;
+}
+
+.staff-batch-note.practice-pattern-note.status-wrong .staff-batch-note-head {
+  border-color: #b00020;
+  background: #fdecef;
 }
 
 .staff-batch-note-stem {
