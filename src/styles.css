@@ -394,7 +394,7 @@ button.primary {
 
 .practice-tuning {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 7.5rem;
+  grid-template-columns: minmax(0, 1fr) 7.5rem 7.5rem;
   gap: 0.55rem;
   margin-top: 0.65rem;
 }
@@ -411,7 +411,8 @@ button.primary {
   width: 100%;
 }
 
-.practice-tuning input[type="number"] {
+.practice-tuning input[type="number"],
+.practice-tuning select {
   width: 100%;
   min-width: 0;
   border: 1px solid #d2c4af;
@@ -441,6 +442,10 @@ button.primary {
   border: 1px solid #e4d8c6;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.practice-debug-cell.wide {
+  grid-column: 1 / -1;
 }
 
 .practice-debug-cell span,

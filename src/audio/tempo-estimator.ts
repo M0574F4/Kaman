@@ -70,6 +70,10 @@ export class TempoEstimator {
   private lastPeakEstimate: TempoEstimate | null = null;
   private peakThreshold = 50;
   private peakMergeMs: number | null = null;
+  private responsivenessIntervals = 4;
+  private peakScanIndex = 2;
+  private events: OnsetPeak[] = [];
+  private lastRecentIntervalsMs: number[] = [];
 
   constructor(
     private readonly sampleRate: number,
@@ -86,6 +90,10 @@ export class TempoEstimator {
   setPeakPickingOptions(peakThreshold: number, peakMergeMs: number): void {
     this.peakThreshold = clamp(peakThreshold, 1, 100);
     this.peakMergeMs = clamp(peakMergeMs, 80, 800);
+  }
+
+  setResponsivenessIntervals(intervalCount: number): void {
+    this.responsivenessIntervals = Math.round(clamp(intervalCount, 2, 8));
   }
 
   reset(): void {
@@ -107,6 +115,9 @@ export class TempoEstimator {
     this.lastRecentPeakEstimate = null;
     this.lastAutocorrelationEstimate = null;
     this.lastPeakEstimate = null;
+    this.peakScanIndex = 2;
+    this.events = [];
+    this.lastRecentIntervalsMs = [];
   }
 
   process(
@@ -310,13 +321,69 @@ export class TempoEstimator {
     const earliestMs = tMs - this.opts.windowMs;
     while (this.samples.length > 0 && this.samples[0].tMs < earliestMs) {
       this.samples.shift();
+      this.peakScanIndex = Math.max(2, this.peakScanIndex - 1);
     }
+    while (this.events.length > 0 && this.events[0].tMs < earliestMs) {
+      this.events.shift();
+    }
+
+    this.commitNewPeakEvents();
+  }
+
+  private commitNewPeakEvents(): void {
+    while (this.peakScanIndex <= this.samples.length - 3) {
+      const index = this.peakScanIndex;
+      const sample = this.samples[index];
+      const current = sample.value;
+      const isLocalPeak =
+        sample.active &&
+        current >= this.samples[index - 1].value &&
+        current > this.samples[index + 1].value &&
+        current >= this.samples[index - 2].value &&
+        current >= this.samples[index + 2].value;
+
+      if (isLocalPeak && current >= this.peakThresholdForIndex(index)) {
+        this.commitPeakEvent({ tMs: sample.tMs, value: current });
+      }
+
+      this.peakScanIndex += 1;
+    }
+  }
+
+  private commitPeakEvent(event: OnsetPeak): void {
+    const previousEvent = this.events[this.events.length - 1] ?? null;
+    if (previousEvent && event.tMs - previousEvent.tMs < this.onsetRefractoryMsForTarget()) {
+      if (event.value > previousEvent.value) {
+        previousEvent.tMs = event.tMs;
+        previousEvent.value = event.value;
+      }
+      return;
+    }
+
+    this.events.push(event);
+  }
+
+  private peakThresholdForIndex(index: number): number {
+    const start = Math.max(0, index - Math.round(this.opts.windowMs / this.opts.sampleStepMs));
+    const values = this.samples.slice(start, index + 1).map((sample) => sample.value);
+    if (values.length === 0) {
+      return 1;
+    }
+
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance =
+      values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / values.length;
+    const stdDev = Math.sqrt(variance);
+    const sorted = [...values].sort((a, b) => a - b);
+    const percentile75 = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
+    return Math.max(0.055, mean + stdDev * 0.45, percentile75 * 0.82) * this.peakThresholdScale();
   }
 
   private estimateTempo(tMs: number): TempoEstimate | null {
     this.lastAutocorrelationEstimate = null;
     this.lastPeakEstimate = null;
     this.lastRecentPeakEstimate = null;
+    this.lastRecentIntervalsMs = [];
 
     const inactiveResetMs = clamp((60_000 / this.opts.targetBpm) * 1.45, 900, 2600);
     if (this.lastActiveMs === null || tMs - this.lastActiveMs > inactiveResetMs) {
@@ -328,11 +395,6 @@ export class TempoEstimator {
 
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
     if (activeSamples.length < 40) {
-      return null;
-    }
-
-    const spanMs = activeSamples[activeSamples.length - 1].tMs - activeSamples[0].tMs;
-    if (spanMs < this.opts.minWindowMs) {
       return null;
     }
 
@@ -348,6 +410,18 @@ export class TempoEstimator {
       return null;
     }
 
+    const eventWindow = this.events.filter((event) => tMs - event.tMs <= this.opts.windowMs);
+    const recentPeakEstimate = this.estimateFromRecentPeakSpacing(eventWindow, tMs);
+    this.lastRecentPeakEstimate = recentPeakEstimate;
+    if (recentPeakEstimate && recentPeakEstimate.confidence >= 0.24) {
+      return this.stabilizeEstimate(recentPeakEstimate);
+    }
+
+    const spanMs = activeSamples[activeSamples.length - 1].tMs - activeSamples[0].tMs;
+    if (spanMs < this.opts.minWindowMs) {
+      return null;
+    }
+
     const values = activeSamples.map((sample) => sample.value);
     const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
     const centered = values.map((value) => value - mean);
@@ -357,11 +431,8 @@ export class TempoEstimator {
       return null;
     }
 
-    const peaks = this.pickPeaks(activeSamples);
-    const recentPeakEstimate = this.estimateFromRecentPeakSpacing(peaks, tMs);
     const autocorrelationEstimate = this.estimateFromAutocorrelation(centered);
-    const peakEstimate = this.estimateFromOnsetPeaks(peaks);
-    this.lastRecentPeakEstimate = recentPeakEstimate;
+    const peakEstimate = this.estimateFromOnsetPeaks(eventWindow);
     this.lastAutocorrelationEstimate = autocorrelationEstimate;
     this.lastPeakEstimate = peakEstimate;
     const rawEstimate = combineTempoEstimates(
@@ -378,15 +449,15 @@ export class TempoEstimator {
 
   private buildDebugFrame(tMs: number): TempoDebugFrame {
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
-    const peaks = this.pickPeaks(activeSamples);
+    const events = this.events.filter((event) => tMs - event.tMs <= this.opts.windowMs);
     const pointStep = Math.max(1, Math.ceil(activeSamples.length / 96));
     const decimated = activeSamples.filter((_, index) => index % pointStep === 0);
     const peakPointIndexes = new Set<number>();
-    for (const peak of peaks) {
+    for (const event of events) {
       let closestIndex = -1;
       let closestDistance = Infinity;
       for (let i = 0; i < decimated.length; i += 1) {
-        const distance = Math.abs(decimated[i].tMs - peak.tMs);
+        const distance = Math.abs(decimated[i].tMs - event.tMs);
         if (distance < closestDistance) {
           closestDistance = distance;
           closestIndex = i;
@@ -416,9 +487,11 @@ export class TempoEstimator {
       active: this.lastActive,
       activeRatio: this.lastActiveRatio,
       recentActiveRatio: this.lastRecentActiveRatio,
-      peakCount: peaks.length,
+      peakCount: events.length,
       peakThreshold: this.peakThreshold,
       peakMergeMs: this.onsetRefractoryMsForTarget(),
+      responsivenessIntervals: this.responsivenessIntervals,
+      recentIntervalsMs: [...this.lastRecentIntervalsMs],
       recentPeakBpm: this.lastRecentPeakEstimate?.bpm ?? null,
       recentPeakConfidence: this.lastRecentPeakEstimate?.confidence ?? 0,
       autocorrelationBpm: this.lastAutocorrelationEstimate?.bpm ?? null,
@@ -490,8 +563,9 @@ export class TempoEstimator {
   private estimateFromRecentPeakSpacing(peaks: OnsetPeak[], tMs: number): TempoEstimate | null {
     const recentPeaks = peaks
       .filter((peak) => tMs - peak.tMs <= 4200)
-      .slice(-7);
+      .slice(-(this.responsivenessIntervals + 1));
     if (recentPeaks.length < 3) {
+      this.lastRecentIntervalsMs = [];
       return null;
     }
 
@@ -503,9 +577,11 @@ export class TempoEstimator {
       }
     }
     if (intervals.length < 2) {
+      this.lastRecentIntervalsMs = intervals;
       return null;
     }
 
+    this.lastRecentIntervalsMs = intervals.slice(-this.responsivenessIntervals);
     const medianIntervalMs = median(intervals);
     const deviations = intervals.map((intervalMs) => Math.abs(intervalMs - medianIntervalMs));
     const medianDeviationMs = median(deviations);
@@ -513,7 +589,7 @@ export class TempoEstimator {
     const bpm = normalizeBpmToRange(60_000 / medianIntervalMs, this.opts.minBpm, this.opts.maxBpm);
     const strength =
       recentPeaks.reduce((sum, peak) => sum + peak.value, 0) / recentPeaks.length;
-    const countScore = clamp01((intervals.length - 1) / 4);
+    const countScore = clamp01((intervals.length - 1) / Math.max(1, this.responsivenessIntervals - 1));
     const consistencyScore = clamp01(1 - relativeDeviation / 0.28);
     const confidence = clamp01(0.14 + countScore * 0.34 + consistencyScore * 0.38 + strength * 0.22);
 
@@ -574,10 +650,6 @@ export class TempoEstimator {
     return clamp(targetPeriodMs * 0.55, 180, 460);
   }
 
-  private pickPeaks(samples: NoveltySample[]): OnsetPeak[] {
-    return pickOnsetPeaks(samples, this.onsetRefractoryMsForTarget(), this.peakThresholdScale());
-  }
-
   private peakThresholdScale(): number {
     return 0.55 + this.peakThreshold * 0.009;
   }
@@ -631,51 +703,6 @@ function normalizedLagCorrelation(values: number[], lag: number): number {
 
   const denominator = Math.sqrt(leftEnergy * rightEnergy) + 1e-9;
   return numerator / denominator;
-}
-
-function pickOnsetPeaks(
-  samples: NoveltySample[],
-  refractoryMs: number,
-  thresholdScale: number,
-): OnsetPeak[] {
-  if (samples.length < 5) {
-    return [];
-  }
-
-  const values = samples.map((sample) => sample.value);
-  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance =
-    values.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / values.length;
-  const stdDev = Math.sqrt(variance);
-  const sorted = [...values].sort((a, b) => a - b);
-  const percentile75 = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
-  const threshold = Math.max(0.055, mean + stdDev * 0.45, percentile75 * 0.82) * thresholdScale;
-  const peaks: OnsetPeak[] = [];
-
-  for (let i = 2; i < samples.length - 2; i += 1) {
-    const current = samples[i].value;
-    const isLocalPeak =
-      current >= samples[i - 1].value &&
-      current > samples[i + 1].value &&
-      current >= samples[i - 2].value &&
-      current >= samples[i + 2].value;
-    if (!isLocalPeak || current < threshold) {
-      continue;
-    }
-
-    const previousPeak = peaks[peaks.length - 1] ?? null;
-    if (previousPeak && samples[i].tMs - previousPeak.tMs < refractoryMs) {
-      if (current > previousPeak.value) {
-        previousPeak.tMs = samples[i].tMs;
-        previousPeak.value = current;
-      }
-      continue;
-    }
-
-    peaks.push({ tMs: samples[i].tMs, value: current });
-  }
-
-  return peaks;
 }
 
 function combineTempoEstimates(

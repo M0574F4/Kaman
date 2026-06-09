@@ -58,6 +58,8 @@ export type TempoDebugFrame = {
   peakCount: number;
   peakThreshold: number;
   peakMergeMs: number;
+  responsivenessIntervals: number;
+  recentIntervalsMs: number[];
   recentPeakBpm: number | null;
   recentPeakConfidence: number;
   autocorrelationBpm: number | null;
