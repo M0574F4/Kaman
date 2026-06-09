@@ -381,6 +381,52 @@ button.primary {
   background: #edf0ed;
 }
 
+.practice-pattern-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.58rem;
+  margin-top: 0.58rem;
+}
+
+.practice-pattern-play {
+  width: 2.45rem;
+  height: 2.45rem;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 0;
+  color: #ffffff;
+  background: #1b4332;
+  border-color: #1b4332;
+  line-height: 1;
+}
+
+.practice-pattern-play.playing {
+  background: #5d2e0b;
+  border-color: #5d2e0b;
+}
+
+.practice-pattern-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+}
+
+.practice-pattern-copy strong {
+  font-size: 0.88rem;
+  color: #1f2f2a;
+  line-height: 1.1;
+}
+
+.practice-pattern-copy span {
+  color: #60706b;
+  font-size: 0.76rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 .practice-estimate,
 .practice-detail {
   margin: 0.38rem 0 0;
@@ -781,6 +827,110 @@ button.primary {
 .staff-batch-grid.fading {
   z-index: 1;
   pointer-events: none;
+}
+
+.practice-pattern-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(var(--pattern-cols, 16), minmax(0, 1fr));
+}
+
+.practice-pattern-slot {
+  position: relative;
+  min-width: 0;
+  border-right: 1px dashed rgba(120, 101, 75, 0.18);
+}
+
+.practice-pattern-slot:last-child {
+  border-right: none;
+}
+
+.practice-pattern-note {
+  position: absolute;
+  left: 50%;
+  width: 26px;
+  height: 20px;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center;
+  transition: transform 110ms ease, filter 110ms ease;
+}
+
+.practice-pattern-note.active {
+  transform: translate(-50%, -50%) scale(1.1);
+  filter: drop-shadow(0 0 5px rgba(27, 67, 50, 0.3));
+}
+
+.practice-pattern-note-head {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  width: 18px;
+  height: 12px;
+  border-radius: 50%;
+  background: #111111;
+  transform: rotate(-18deg);
+}
+
+.practice-pattern-note.status-correct .practice-pattern-note-head {
+  background: #2d6a4f;
+}
+
+.practice-pattern-note.status-wrong .practice-pattern-note-head {
+  background: #b00020;
+}
+
+.practice-pattern-ledger-line {
+  position: absolute;
+  left: 50%;
+  width: 32px;
+  height: 1px;
+  transform: translateX(-50%);
+  background: #78654b;
+}
+
+.practice-pattern-target,
+.practice-pattern-string,
+.practice-pattern-played {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  line-height: 1.05;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.practice-pattern-target {
+  bottom: 40px;
+  color: #1f2f2a;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.practice-pattern-string {
+  bottom: 27px;
+  color: #7b705f;
+  font-size: 0.58rem;
+}
+
+.practice-pattern-played {
+  bottom: 8px;
+  padding: 0 1px;
+  color: #9a9184;
+  font-size: 0.54rem;
+}
+
+.practice-pattern-played.status-correct {
+  color: #2d6a4f;
+  font-weight: 700;
+}
+
+.practice-pattern-played.status-wrong {
+  color: #b00020;
+  font-weight: 700;
 }
 
 .staff-beat-slot {

@@ -85,6 +85,24 @@ type BeatBatch = {
   status: BeatStatus;
 };
 
+type PracticePatternNote = {
+  midi: number;
+  label: "Re" | "La";
+  stringLabel: "S1" | "S2" | "S3" | "S4";
+};
+
+type PracticePatternResult = {
+  status: "pending" | "correct" | "wrong";
+  playedMidi: number | null;
+};
+
+const WARMUP_1_PATTERN: PracticePatternNote[] = [
+  ...makeWarmupGroup(62, "Re", "S1"),
+  ...makeWarmupGroup(69, "La", "S2"),
+  ...makeWarmupGroup(62, "Re", "S3"),
+  ...makeWarmupGroup(69, "La", "S4"),
+];
+
 const state = createInitialState();
 const sequenceSettings = initialSequenceSettings();
 const liveSettings = initialLiveSettings();
@@ -115,6 +133,13 @@ let practicePeakMergeTouched = false;
 let practiceTolerancePct = 8;
 let showPracticeDebug = false;
 let practiceCorrectionSource: TempoResponsivenessLabel = "Balanced";
+let practicePatternPlaying = false;
+let practicePatternStartedAtMs = 0;
+let practicePatternAudioStartTime = 0;
+let practicePatternActiveIndex: number | null = null;
+let practicePatternStopTimer: number | null = null;
+let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
+const practicePatternOscillators: OscillatorNode[] = [];
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
@@ -161,6 +186,8 @@ type UiRefs = {
   practiceStatus: HTMLDivElement;
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
+  practicePatternPlayBtn: HTMLButtonElement;
+  practicePatternReadout: HTMLSpanElement;
   practiceToleranceInput: HTMLInputElement;
   practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
@@ -266,6 +293,13 @@ function mountUi(): void {
           </div>
           <div id="practice-panel" class="practice-panel">
             <div id="practice-status" class="practice-status status-idle">-</div>
+            <div class="practice-pattern-controls">
+              <button id="practice-pattern-play" type="button" class="practice-pattern-play" aria-label="Play Warmup 1">▶</button>
+              <div class="practice-pattern-copy">
+                <strong>Warmup 1</strong>
+                <span id="practice-pattern-readout">Re Re Re Re | La La La La | Re Re Re Re | La La La La</span>
+              </div>
+            </div>
             <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
             <div class="practice-minimal-controls">
@@ -369,6 +403,8 @@ function mountUi(): void {
   const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
+  const practicePatternPlayBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-play");
+  const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
   const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
   const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
@@ -420,6 +456,8 @@ function mountUi(): void {
     !practiceStatus ||
     !practiceEstimate ||
     !practiceDetail ||
+    !practicePatternPlayBtn ||
+    !practicePatternReadout ||
     !practiceToleranceInput ||
     !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
@@ -474,6 +512,8 @@ function mountUi(): void {
     practiceStatus,
     practiceEstimate,
     practiceDetail,
+    practicePatternPlayBtn,
+    practicePatternReadout,
     practiceToleranceInput,
     practiceCorrectionSourceSelect,
     practiceDebugToggle,
@@ -527,6 +567,10 @@ function mountUi(): void {
     void onToggleRecording();
   });
 
+  practicePatternPlayBtn.addEventListener("click", () => {
+    void onTogglePracticePatternPlayback();
+  });
+
   sequenceSubmodeSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     sequenceSubMode = target.value === "phrase" ? "phrase" : "single-beat";
@@ -557,6 +601,7 @@ function mountUi(): void {
     if (nextBpm === sequenceSettings.bpm) {
       return;
     }
+    stopPracticePatternPlayback(false);
     sequenceSettings.bpm = nextBpm;
     resetPracticeEstimate(nextBpm);
     if (!practicePeakMergeTouched) {
@@ -593,6 +638,7 @@ function mountUi(): void {
     if (nextBpm === sequenceSettings.bpm) {
       return;
     }
+    stopPracticePatternPlayback(false);
     sequenceSettings.bpm = nextBpm;
     resetPracticeEstimate(nextBpm);
     if (!practicePeakMergeTouched) {
@@ -865,6 +911,7 @@ function render(): void {
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
   const spectrumModeActive = state.mode === "spectrum";
+  const practicePatternStaffActive = state.mode === "practice";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
   ui.staff.style.display = spectrumModeActive ? "none" : "block";
   ui.spectrumPanel.style.display = spectrumModeActive ? "block" : "none";
@@ -875,6 +922,14 @@ function render(): void {
   if (spectrumModeActive) {
     ui.staffBatchLayer.style.display = "none";
     ui.staffBatchLayer.innerHTML = "";
+    ui.noteGroup.style.visibility = "hidden";
+    ui.ledgerLayer.innerHTML = "";
+    ui.trailLayer.innerHTML = "";
+    trailNotes.length = 0;
+    previousDisplayedSnapshot = null;
+  } else if (practicePatternStaffActive) {
+    ui.staffBatchLayer.style.display = "block";
+    ui.staffBatchLayer.innerHTML = renderStaffPracticePattern(nowMs);
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -947,7 +1002,7 @@ function render(): void {
     }
   }
 
-  if (fadingBeatBatches.length > 0) {
+  if (fadingBeatBatches.length > 0 || practicePatternPlaying) {
     scheduleRender();
   }
 }
@@ -962,6 +1017,186 @@ function captureButtonLabel(): string {
   }
 
   return state.recording ? "Stop Phrase Capture" : "Start Phrase Capture";
+}
+
+async function onTogglePracticePatternPlayback(): Promise<void> {
+  if (practicePatternPlaying) {
+    stopPracticePatternPlayback(false);
+    return;
+  }
+
+  if (state.mode !== "practice") {
+    state.mode = "practice";
+  }
+
+  if (!state.listening) {
+    await onToggleListening();
+    if (!state.listening) {
+      return;
+    }
+  }
+
+  const ctx = await ensureSharedAudioContext();
+  const leadInMs = 90;
+  const noteDurationMs = practicePatternNoteDurationMs();
+  const totalDurationMs = WARMUP_1_PATTERN.length * noteDurationMs;
+
+  clearPracticePatternOscillators();
+  practicePatternResults = createPracticePatternResults();
+  practicePatternPlaying = true;
+  practicePatternActiveIndex = null;
+  practicePatternStartedAtMs = performance.now() + leadInMs;
+  practicePatternAudioStartTime = ctx.currentTime + leadInMs / 1000;
+
+  WARMUP_1_PATTERN.forEach((note, index) => {
+    const startAt = practicePatternAudioStartTime + (index * noteDurationMs) / 1000;
+    schedulePracticeTone(ctx, note.midi, startAt, noteDurationMs / 1000);
+  });
+
+  if (practicePatternStopTimer !== null) {
+    window.clearTimeout(practicePatternStopTimer);
+  }
+  practicePatternStopTimer = window.setTimeout(() => {
+    stopPracticePatternPlayback(false);
+  }, leadInMs + totalDurationMs + 140);
+
+  scheduleRender();
+}
+
+function stopPracticePatternPlayback(resetResults: boolean): void {
+  practicePatternPlaying = false;
+  practicePatternActiveIndex = null;
+  practicePatternStartedAtMs = 0;
+  practicePatternAudioStartTime = 0;
+  if (practicePatternStopTimer !== null) {
+    window.clearTimeout(practicePatternStopTimer);
+    practicePatternStopTimer = null;
+  }
+  clearPracticePatternOscillators();
+  if (resetResults) {
+    practicePatternResults = createPracticePatternResults();
+  }
+  scheduleRender();
+}
+
+function clearPracticePatternOscillators(): void {
+  while (practicePatternOscillators.length > 0) {
+    const osc = practicePatternOscillators.pop();
+    try {
+      osc?.stop();
+    } catch {
+      // Already stopped or not yet started.
+    }
+    try {
+      osc?.disconnect();
+    } catch {
+      // no-op
+    }
+  }
+}
+
+function schedulePracticeTone(
+  ctx: AudioContext,
+  midi: number,
+  startAt: number,
+  durationSeconds: number,
+): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const endAt = startAt + Math.max(0.08, durationSeconds * 0.82);
+  const releaseAt = Math.max(startAt + 0.05, endAt - 0.045);
+
+  osc.type = "triangle";
+  osc.frequency.value = midiToFrequency(midi);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.linearRampToValueAtTime(0.14, startAt + 0.012);
+  gain.gain.setTargetAtTime(0.105, startAt + 0.04, 0.08);
+  gain.gain.setValueAtTime(0.05, releaseAt);
+  gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+
+  osc.start(startAt);
+  osc.stop(endAt + 0.01);
+  osc.onended = () => {
+    const index = practicePatternOscillators.indexOf(osc);
+    if (index >= 0) {
+      practicePatternOscillators.splice(index, 1);
+    }
+    try {
+      osc.disconnect();
+      gain.disconnect();
+    } catch {
+      // no-op
+    }
+  };
+  practicePatternOscillators.push(osc);
+}
+
+function practicePatternNoteDurationMs(): number {
+  return 60_000 / sequenceSettings.bpm;
+}
+
+function practicePatternCurrentIndex(nowMs: number): number | null {
+  if (!practicePatternPlaying || practicePatternStartedAtMs <= 0) {
+    return null;
+  }
+  const elapsedMs = nowMs - practicePatternStartedAtMs;
+  if (elapsedMs < 0) {
+    return null;
+  }
+  const index = Math.floor(elapsedMs / practicePatternNoteDurationMs());
+  if (index < 0 || index >= WARMUP_1_PATTERN.length) {
+    return null;
+  }
+  return index;
+}
+
+function capturePracticePatternFrame(frame: PitchFrame): void {
+  if (!practicePatternPlaying || state.mode !== "practice") {
+    return;
+  }
+
+  const index = practicePatternCurrentIndex(frame.tMs);
+  practicePatternActiveIndex = index;
+  if (index === null) {
+    return;
+  }
+
+  const noteDurationMs = practicePatternNoteDurationMs();
+  const noteElapsedMs = frame.tMs - practicePatternStartedAtMs - index * noteDurationMs;
+  if (noteElapsedMs < noteDurationMs * 0.18) {
+    return;
+  }
+
+  const playedMidi =
+    state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
+  if (playedMidi === null) {
+    return;
+  }
+
+  const result = practicePatternResults[index];
+  const target = WARMUP_1_PATTERN[index];
+  if (!result || !target) {
+    return;
+  }
+
+  const isCorrect = playedMidi === target.midi;
+  if (isCorrect || result.status === "pending") {
+    result.status = isCorrect ? "correct" : "wrong";
+    result.playedMidi = playedMidi;
+  } else if (result.status === "wrong") {
+    result.playedMidi = playedMidi;
+  }
+}
+
+function practicePatternReadoutText(): string {
+  const correct = practicePatternResults.filter((result) => result.status === "correct").length;
+  const wrong = practicePatternResults.filter((result) => result.status === "wrong").length;
+  const active = practicePatternActiveIndex === null ? "" : ` | note ${practicePatternActiveIndex + 1}/16`;
+  const score = correct > 0 || wrong > 0 ? ` | ${correct} correct, ${wrong} wrong` : "";
+  return `Re Re Re Re | La La La La | Re Re Re Re | La La La La${active}${score}`;
 }
 
 function resetPracticeEstimate(targetBpm = sequenceSettings.bpm): void {
@@ -985,6 +1220,13 @@ function renderPracticePanel(): void {
   const statusClass = practice.status;
   ui.practiceStatus.className = `practice-status status-${statusClass}`;
   ui.practiceStatus.textContent = statusLabel;
+  ui.practicePatternPlayBtn.textContent = practicePatternPlaying ? "■" : "▶";
+  ui.practicePatternPlayBtn.setAttribute(
+    "aria-label",
+    practicePatternPlaying ? "Stop Warmup 1" : "Play Warmup 1",
+  );
+  ui.practicePatternPlayBtn.classList.toggle("playing", practicePatternPlaying);
+  ui.practicePatternReadout.textContent = practicePatternReadoutText();
 
   const estimatedText =
     practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
@@ -1392,6 +1634,7 @@ function resetMetronomeClock(): void {
 
 async function onToggleListening(): Promise<void> {
   if (state.listening) {
+    stopPracticePatternPlayback(false);
     pipeline?.stop();
     pipeline = null;
 
@@ -1489,6 +1732,10 @@ function onModeChange(event: Event): void {
 
   if (state.mode === "spectrum") {
     spectrogram?.reset();
+  }
+
+  if (state.mode !== "practice") {
+    stopPracticePatternPlayback(false);
   }
 
   if (state.mode !== "sequence") {
@@ -1668,6 +1915,8 @@ function onPitchFrame(frame: PitchFrame): void {
       state.sequence = collector.snapshot(frame.tMs);
     }
   }
+
+  capturePracticePatternFrame(frame);
 
   scheduleRender();
 }
@@ -2138,6 +2387,43 @@ function renderBeatBatchCard(batch: BeatBatch, className: string, style: string)
   return `<div class="${className}" style="--beat-cols:${Math.max(1, sourceBeats.length)}; ${style}">${beatCells}</div>`;
 }
 
+function renderStaffPracticePattern(nowMs: number): string {
+  const activeIndex = practicePatternCurrentIndex(nowMs);
+  practicePatternActiveIndex = activeIndex;
+
+  const slots = WARMUP_1_PATTERN.map((note, index) => {
+    const result = practicePatternResults[index] ?? { status: "pending", playedMidi: null };
+    const y = midiToStaffY(note.midi);
+    const ledgers = ledgerLineYs(note.midi)
+      .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+      .join("");
+    const statusClass = `status-${result.status}`;
+    const activeClass = activeIndex === index ? "active" : "";
+    const playedLabel =
+      result.playedMidi === null
+        ? "&nbsp;"
+        : `${midiToSolfege(result.playedMidi)} ${midiToScientific(result.playedMidi)}`;
+
+    return `
+      <div class="practice-pattern-slot">
+        ${ledgers}
+        <div class="practice-pattern-note ${statusClass} ${activeClass}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
+          <div class="practice-pattern-note-head"></div>
+        </div>
+        <div class="practice-pattern-target">${note.label}</div>
+        <div class="practice-pattern-string">${note.stringLabel}</div>
+        <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="practice-pattern-grid" style="--pattern-cols:${WARMUP_1_PATTERN.length}">
+      ${slots}
+    </div>
+  `;
+}
+
 function renderStaffBeatBatch(nowMs: number): string {
   const batch = currentBeatBatch;
   const beatCount = beatsPerBar(sequenceSettings.timeSignature);
@@ -2474,6 +2760,25 @@ function asBeatUnit(value: string): BeatUnit {
     return value;
   }
   return "quarter";
+}
+
+function makeWarmupGroup(
+  midi: number,
+  label: PracticePatternNote["label"],
+  stringLabel: PracticePatternNote["stringLabel"],
+): PracticePatternNote[] {
+  return Array.from({ length: 4 }, () => ({ midi, label, stringLabel }));
+}
+
+function createPracticePatternResults(): PracticePatternResult[] {
+  return WARMUP_1_PATTERN.map(() => ({
+    status: "pending",
+    playedMidi: null,
+  }));
+}
+
+function midiToFrequency(midi: number): number {
+  return 440 * 2 ** ((midi - 69) / 12);
 }
 
 function clamp(value: number, min: number, max: number): number {
