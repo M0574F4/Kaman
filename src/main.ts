@@ -887,6 +887,7 @@ function renderPracticeDebug(): string {
   const noisePct = rmsToDisplayPct(debug.noiseFloorRms);
   const autoBpm = debug.autocorrelationBpm === null ? "-" : Math.round(debug.autocorrelationBpm).toString();
   const peakBpm = debug.peakBpm === null ? "-" : Math.round(debug.peakBpm).toString();
+  const recentPeakBpm = debug.recentPeakBpm === null ? "-" : Math.round(debug.recentPeakBpm).toString();
 
   return `
     <div class="practice-debug-grid">
@@ -909,7 +910,7 @@ function renderPracticeDebug(): string {
       <div class="practice-debug-cell">
         <span>Peaks</span>
         <strong>${debug.peakCount}</strong>
-        <small>peak tempo ${peakBpm} BPM (${(debug.peakConfidence * 100).toFixed(0)}%)</small>
+        <small>recent spacing ${recentPeakBpm} BPM (${(debug.recentPeakConfidence * 100).toFixed(0)}%) | window ${peakBpm} BPM</small>
       </div>
       <div class="practice-debug-cell">
         <span>Periodicity</span>

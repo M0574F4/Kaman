@@ -56,6 +56,8 @@ export type TempoDebugFrame = {
   activeRatio: number;
   recentActiveRatio: number;
   peakCount: number;
+  recentPeakBpm: number | null;
+  recentPeakConfidence: number;
   autocorrelationBpm: number | null;
   autocorrelationConfidence: number;
   peakBpm: number | null;

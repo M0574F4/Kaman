@@ -65,6 +65,7 @@ export class TempoEstimator {
   private lastActive = false;
   private lastActiveRatio = 0;
   private lastRecentActiveRatio = 0;
+  private lastRecentPeakEstimate: TempoEstimate | null = null;
   private lastAutocorrelationEstimate: TempoEstimate | null = null;
   private lastPeakEstimate: TempoEstimate | null = null;
 
@@ -96,6 +97,7 @@ export class TempoEstimator {
     this.lastActive = false;
     this.lastActiveRatio = 0;
     this.lastRecentActiveRatio = 0;
+    this.lastRecentPeakEstimate = null;
     this.lastAutocorrelationEstimate = null;
     this.lastPeakEstimate = null;
   }
@@ -307,6 +309,7 @@ export class TempoEstimator {
   private estimateTempo(tMs: number): TempoEstimate | null {
     this.lastAutocorrelationEstimate = null;
     this.lastPeakEstimate = null;
+    this.lastRecentPeakEstimate = null;
 
     const inactiveResetMs = clamp((60_000 / this.opts.targetBpm) * 1.45, 900, 2600);
     if (this.lastActiveMs === null || tMs - this.lastActiveMs > inactiveResetMs) {
@@ -343,15 +346,22 @@ export class TempoEstimator {
     const centered = values.map((value) => value - mean);
     const energy = centered.reduce((sum, value) => sum + value * value, 0);
     const peakEnergy = values.filter((value) => value > 0.065).reduce((sum, value) => sum + value, 0);
-    if (energy < 0.035 || peakEnergy < 0.75) {
+    if (energy < 0.025 || peakEnergy < 0.45) {
       return null;
     }
 
+    const peaks = pickOnsetPeaks(activeSamples, this.onsetRefractoryMsForTarget());
+    const recentPeakEstimate = this.estimateFromRecentPeakSpacing(peaks, tMs);
     const autocorrelationEstimate = this.estimateFromAutocorrelation(centered);
-    const peakEstimate = this.estimateFromOnsetPeaks(activeSamples);
+    const peakEstimate = this.estimateFromOnsetPeaks(peaks);
+    this.lastRecentPeakEstimate = recentPeakEstimate;
     this.lastAutocorrelationEstimate = autocorrelationEstimate;
     this.lastPeakEstimate = peakEstimate;
-    const rawEstimate = combineTempoEstimates(autocorrelationEstimate, peakEstimate);
+    const rawEstimate = combineTempoEstimates(
+      recentPeakEstimate,
+      peakEstimate,
+      autocorrelationEstimate,
+    );
     if (!rawEstimate) {
       return null;
     }
@@ -400,6 +410,8 @@ export class TempoEstimator {
       activeRatio: this.lastActiveRatio,
       recentActiveRatio: this.lastRecentActiveRatio,
       peakCount: peaks.length,
+      recentPeakBpm: this.lastRecentPeakEstimate?.bpm ?? null,
+      recentPeakConfidence: this.lastRecentPeakEstimate?.confidence ?? 0,
       autocorrelationBpm: this.lastAutocorrelationEstimate?.bpm ?? null,
       autocorrelationConfidence: this.lastAutocorrelationEstimate?.confidence ?? 0,
       peakBpm: this.lastPeakEstimate?.bpm ?? null,
@@ -435,8 +447,7 @@ export class TempoEstimator {
     return { bpm: bestBpm, confidence };
   }
 
-  private estimateFromOnsetPeaks(samples: NoveltySample[]): TempoEstimate | null {
-    const peaks = pickOnsetPeaks(samples, this.onsetRefractoryMsForTarget());
+  private estimateFromOnsetPeaks(peaks: OnsetPeak[]): TempoEstimate | null {
     if (peaks.length < 3) {
       return null;
     }
@@ -465,6 +476,39 @@ export class TempoEstimator {
     const dominance = bestScore - Math.max(0, secondScore);
     const confidence = clamp01(bestScore * 0.72 + dominance * 1.55);
     return { bpm: bestBpm, confidence };
+  }
+
+  private estimateFromRecentPeakSpacing(peaks: OnsetPeak[], tMs: number): TempoEstimate | null {
+    const recentPeaks = peaks
+      .filter((peak) => tMs - peak.tMs <= 4200)
+      .slice(-7);
+    if (recentPeaks.length < 3) {
+      return null;
+    }
+
+    const intervals: number[] = [];
+    for (let i = 1; i < recentPeaks.length; i += 1) {
+      const intervalMs = recentPeaks[i].tMs - recentPeaks[i - 1].tMs;
+      if (intervalMs >= 250 && intervalMs <= 2600) {
+        intervals.push(intervalMs);
+      }
+    }
+    if (intervals.length < 2) {
+      return null;
+    }
+
+    const medianIntervalMs = median(intervals);
+    const deviations = intervals.map((intervalMs) => Math.abs(intervalMs - medianIntervalMs));
+    const medianDeviationMs = median(deviations);
+    const relativeDeviation = medianDeviationMs / Math.max(1, medianIntervalMs);
+    const bpm = normalizeBpmToRange(60_000 / medianIntervalMs, this.opts.minBpm, this.opts.maxBpm);
+    const strength =
+      recentPeaks.reduce((sum, peak) => sum + peak.value, 0) / recentPeaks.length;
+    const countScore = clamp01((intervals.length - 1) / 4);
+    const consistencyScore = clamp01(1 - relativeDeviation / 0.28);
+    const confidence = clamp01(0.14 + countScore * 0.34 + consistencyScore * 0.38 + strength * 0.22);
+
+    return { bpm, confidence };
   }
 
   private onsetIntervalScore(peaks: OnsetPeak[], bpm: number): number {
@@ -524,25 +568,11 @@ export class TempoEstimator {
       return next;
     }
 
-    const octaveDistance = Math.abs(Math.log2(next.bpm / this.smoothedEstimate.bpm));
-    if (octaveDistance <= 0.18) {
-      const bpm = this.smoothedEstimate.bpm * 0.62 + next.bpm * 0.38;
-      const confidence = Math.max(
-        next.confidence,
-        this.smoothedEstimate.confidence * 0.78 + next.confidence * 0.22,
-      );
-      this.smoothedEstimate = { bpm, confidence };
-      return this.smoothedEstimate;
-    }
-
-    if (next.confidence > this.smoothedEstimate.confidence + 0.12 || this.smoothedEstimate.confidence < 0.18) {
-      this.smoothedEstimate = next;
-      return next;
-    }
-
+    const ratioDistance = Math.abs(Math.log2(next.bpm / this.smoothedEstimate.bpm));
+    const alpha = next.confidence >= 0.36 || ratioDistance > 0.16 ? 0.62 : 0.38;
     this.smoothedEstimate = {
-      bpm: this.smoothedEstimate.bpm,
-      confidence: this.smoothedEstimate.confidence * 0.94,
+      bpm: this.smoothedEstimate.bpm * (1 - alpha) + next.bpm * alpha,
+      confidence: Math.max(next.confidence, this.smoothedEstimate.confidence * 0.72),
     };
     return this.smoothedEstimate;
   }
@@ -625,11 +655,30 @@ function pickOnsetPeaks(samples: NoveltySample[], refractoryMs: number): OnsetPe
 }
 
 function combineTempoEstimates(
-  autocorrelationEstimate: TempoEstimate | null,
+  recentPeakEstimate: TempoEstimate | null,
   peakEstimate: TempoEstimate | null,
+  autocorrelationEstimate: TempoEstimate | null,
 ): TempoEstimate | null {
-  if (!autocorrelationEstimate) return peakEstimate;
-  if (!peakEstimate) return autocorrelationEstimate;
+  if (recentPeakEstimate && recentPeakEstimate.confidence >= 0.24) {
+    const support = [peakEstimate, autocorrelationEstimate]
+      .filter((estimate): estimate is TempoEstimate => estimate !== null)
+      .filter((estimate) => Math.abs(Math.log2(estimate.bpm / recentPeakEstimate.bpm)) <= 0.22);
+    if (support.length === 0) {
+      return recentPeakEstimate;
+    }
+
+    const supportWeight = support.reduce((sum, estimate) => sum + estimate.confidence, 0);
+    const supportBpm = support.reduce((sum, estimate) => sum + estimate.bpm * estimate.confidence, 0) /
+      Math.max(0.001, supportWeight);
+    const recentWeight = 0.72;
+    return {
+      bpm: recentPeakEstimate.bpm * recentWeight + supportBpm * (1 - recentWeight),
+      confidence: clamp01(recentPeakEstimate.confidence + supportWeight * 0.18),
+    };
+  }
+
+  if (!autocorrelationEstimate) return peakEstimate ?? recentPeakEstimate;
+  if (!peakEstimate) return autocorrelationEstimate ?? recentPeakEstimate;
 
   const octaveDistance = Math.abs(Math.log2(peakEstimate.bpm / autocorrelationEstimate.bpm));
   if (octaveDistance <= 0.16) {
@@ -643,6 +692,29 @@ function combineTempoEstimates(
 
   const peakIsStronger = peakEstimate.confidence >= autocorrelationEstimate.confidence * 0.88;
   return peakIsStronger ? peakEstimate : autocorrelationEstimate;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) {
+    return sorted[middle];
+  }
+  return (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function normalizeBpmToRange(bpm: number, minBpm: number, maxBpm: number): number {
+  let normalized = bpm;
+  while (normalized < minBpm) {
+    normalized *= 2;
+  }
+  while (normalized > maxBpm) {
+    normalized /= 2;
+  }
+  return clamp(normalized, minBpm, maxBpm);
 }
 
 function statusForEstimate(
