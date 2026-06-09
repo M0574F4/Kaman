@@ -3,6 +3,7 @@ import type {
   TempoDebugFrame,
   TempoFrame,
   TempoResponsivenessEstimate,
+  TempoResponsivenessLabel,
   TempoStatus,
 } from "./types";
 
@@ -84,6 +85,7 @@ export class TempoEstimator {
   private events: OnsetPeak[] = [];
   private lastRecentIntervalsMs: number[] = [];
   private lastResponsivenessEstimates: TempoResponsivenessEstimate[] = emptyResponsivenessEstimates();
+  private correctionEstimateLabel: TempoResponsivenessLabel = "Balanced";
 
   constructor(
     private readonly sampleRate: number,
@@ -104,6 +106,10 @@ export class TempoEstimator {
 
   setTolerancePct(tolerancePct: number): void {
     this.opts.tolerancePct = clamp(tolerancePct, 0.01, 0.3);
+  }
+
+  setCorrectionEstimateLabel(label: TempoResponsivenessLabel): void {
+    this.correctionEstimateLabel = label;
   }
 
   reset(): void {
@@ -424,17 +430,17 @@ export class TempoEstimator {
 
     const eventWindow = this.events.filter((event) => tMs - event.tMs <= this.opts.windowMs);
     this.lastResponsivenessEstimates = this.buildResponsivenessEstimates(eventWindow, tMs);
-    const balancedEstimate = this.lastResponsivenessEstimates.find(
-      (estimate) => estimate.label === "Balanced",
+    const selectedEstimate = this.lastResponsivenessEstimates.find(
+      (estimate) => estimate.label === this.correctionEstimateLabel,
     );
     const recentPeakEstimate =
-      balancedEstimate && balancedEstimate.bpm !== null
+      selectedEstimate && selectedEstimate.bpm !== null
         ? {
-            bpm: balancedEstimate.bpm,
-            confidence: balancedEstimate.confidence,
+            bpm: selectedEstimate.bpm,
+            confidence: selectedEstimate.confidence,
           }
         : null;
-    this.lastRecentIntervalsMs = balancedEstimate?.intervalsMs ?? [];
+    this.lastRecentIntervalsMs = selectedEstimate?.intervalsMs ?? [];
     this.lastRecentPeakEstimate = recentPeakEstimate;
     if (recentPeakEstimate && recentPeakEstimate.confidence >= 0.24) {
       return this.stabilizeEstimate(recentPeakEstimate);

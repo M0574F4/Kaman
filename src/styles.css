@@ -408,13 +408,18 @@ button.primary {
   font-size: 0.82rem;
 }
 
-.practice-minimal-controls input[type="number"] {
+.practice-minimal-controls input[type="number"],
+.practice-minimal-controls select {
   width: 4.8rem;
   min-width: 0;
   border: 1px solid #d2c4af;
   border-radius: 8px;
   padding: 0.34rem 0.42rem;
   font-size: 0.86rem;
+}
+
+.practice-minimal-controls select {
+  width: 7rem;
 }
 
 .practice-debug-toggle {

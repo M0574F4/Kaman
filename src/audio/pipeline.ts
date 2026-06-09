@@ -1,4 +1,4 @@
-import type { PitchFrame, SpectrumFrame, TempoFrame } from "./types";
+import type { PitchFrame, SpectrumFrame, TempoFrame, TempoResponsivenessLabel } from "./types";
 import { AutoCorrelationPitchEstimator } from "./pitch-estimator";
 import { TempoEstimator } from "./tempo-estimator";
 import type { MicHandle } from "./mic";
@@ -9,6 +9,7 @@ export type PipelineHandle = {
   setPracticeTargetBpm: (bpm: number) => void;
   setPracticePeakPicking: (peakThreshold: number, peakMergeMs: number) => void;
   setPracticeTolerancePct: (tolerancePct: number) => void;
+  setPracticeCorrectionSource: (source: TempoResponsivenessLabel) => void;
   resetTempo: () => void;
 };
 
@@ -73,6 +74,9 @@ export function startPitchPipeline(
     },
     setPracticeTolerancePct: (tolerancePct: number) => {
       tempoEstimator.setTolerancePct(tolerancePct);
+    },
+    setPracticeCorrectionSource: (source: TempoResponsivenessLabel) => {
+      tempoEstimator.setCorrectionEstimateLabel(source);
     },
     resetTempo: () => {
       tempoEstimator.reset();

@@ -1,6 +1,11 @@
 import { startMic, stopMic, type MicHandle } from "./audio/mic";
 import { startPitchPipeline, type PipelineHandle } from "./audio/pipeline";
-import { type PitchFrame, type SpectrumFrame, type TempoFrame } from "./audio/types";
+import {
+  type PitchFrame,
+  type SpectrumFrame,
+  type TempoFrame,
+  type TempoResponsivenessLabel,
+} from "./audio/types";
 import { LiveNoteTracker, initialLiveSettings } from "./modes/live-mode";
 import {
   SequenceCollector,
@@ -109,6 +114,7 @@ let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
 let practicePeakMergeTouched = false;
 let practiceTolerancePct = 8;
 let showPracticeDebug = false;
+let practiceCorrectionSource: TempoResponsivenessLabel = "Balanced";
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
@@ -156,6 +162,7 @@ type UiRefs = {
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
   practiceToleranceInput: HTMLInputElement;
+  practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
   practiceDebugSection: HTMLDivElement;
   practicePeakThresholdInput: HTMLInputElement;
@@ -265,6 +272,13 @@ function mountUi(): void {
               <label>Tolerance %
                 <input id="practice-tolerance" type="number" min="1" max="30" step="1" value="8" />
               </label>
+              <label>Correction
+                <select id="practice-correction-source">
+                  <option value="Fast">Fast</option>
+                  <option value="Balanced" selected>Balanced</option>
+                  <option value="Stable">Stable</option>
+                </select>
+              </label>
               <label class="practice-debug-toggle" for="practice-debug-toggle">
                 <input id="practice-debug-toggle" type="checkbox" />
                 Show tempo diagnostics
@@ -356,6 +370,7 @@ function mountUi(): void {
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
   const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
+  const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
   const practiceDebugSection = appRoot.querySelector<HTMLDivElement>("#practice-debug-section");
   const practicePeakThresholdInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-threshold");
@@ -406,6 +421,7 @@ function mountUi(): void {
     !practiceEstimate ||
     !practiceDetail ||
     !practiceToleranceInput ||
+    !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
     !practiceDebugSection ||
     !practicePeakThresholdInput ||
@@ -459,6 +475,7 @@ function mountUi(): void {
     practiceEstimate,
     practiceDetail,
     practiceToleranceInput,
+    practiceCorrectionSourceSelect,
     practiceDebugToggle,
     practiceDebugSection,
     practicePeakThresholdInput,
@@ -609,6 +626,13 @@ function mountUi(): void {
     practiceTolerancePct = clamp(parseInt(target.value || "8", 10), 1, 30);
     target.value = String(practiceTolerancePct);
     syncPracticeTolerancePipeline();
+    scheduleRender();
+  });
+
+  practiceCorrectionSourceSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    practiceCorrectionSource = asPracticeCorrectionSource(target.value);
+    syncPracticeCorrectionSourcePipeline();
     scheduleRender();
   });
 
@@ -775,6 +799,7 @@ function render(): void {
   if (activeElement !== ui.practiceToleranceInput) {
     ui.practiceToleranceInput.value = String(practiceTolerancePct);
   }
+  ui.practiceCorrectionSourceSelect.value = practiceCorrectionSource;
   ui.practiceDebugToggle.checked = showPracticeDebug;
   ui.practiceDebugSection.style.display = showPracticeDebug ? "block" : "none";
   if (activeElement !== ui.practicePeakThresholdInput) {
@@ -914,8 +939,8 @@ function render(): void {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
     if (state.mode === "practice") {
-      ui.sequenceMeta.textContent = "Practice tempo | target-biased rolling estimate | bowed-string onset cautious";
-      ui.sequenceSummary.textContent = renderPracticeSummary();
+      ui.sequenceMeta.textContent = "";
+      ui.sequenceSummary.textContent = "";
     } else {
       ui.sequenceMeta.textContent = "Live intonation | staff placement | optional fade trail";
       ui.sequenceSummary.textContent = "Use Live Mode for note, cents, confidence, and optional adjacent-string bleed checks.";
@@ -970,24 +995,8 @@ function renderPracticePanel(): void {
   ui.practiceEstimate.textContent =
     `Target ${practice.targetBpm} BPM | estimated ${estimatedText}${diffText}`;
   ui.practiceDetail.textContent =
-    `Tolerance ±${practiceTolerancePct}% | Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
+    `Correction ${practiceCorrectionSource} | Tolerance ±${practiceTolerancePct}% | Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
-}
-
-function renderPracticeSummary(): string {
-  const practice = state.practice;
-  const estimate = practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
-  const diff = practice.differenceBpm === null ? "-" : `${formatSigned(practice.differenceBpm)} BPM`;
-  return [
-    `Target BPM: ${practice.targetBpm}`,
-    `Estimated BPM: ${estimate}`,
-    `Difference: ${diff}`,
-    `Feedback: ${practiceStatusLabel(practice.status, state.listening)}`,
-    `Tolerance: ±${practiceTolerancePct}%`,
-    `Confidence: ${(practice.confidence * 100).toFixed(0)}%`,
-    "",
-    "The estimator listens for repeated changes in tone, energy, and spectrum. If the bowing is too smooth or the pulse is unclear, it will wait instead of guessing.",
-  ].join("\n");
 }
 
 function renderPracticeDebug(): string {
@@ -1056,8 +1065,8 @@ function renderPracticeDebug(): string {
       </div>
       <div class="practice-debug-cell wide">
         <span>Committed intervals</span>
-        <strong>Balanced: ${intervalText}</strong>
-        <small>main estimate uses Balanced; compare all three below</small>
+        <strong>${practiceCorrectionSource}: ${intervalText}</strong>
+        <small>correction label uses ${practiceCorrectionSource}; compare all three below</small>
         <div class="practice-response-grid">${responseCards}</div>
       </div>
     </div>
@@ -1134,8 +1143,16 @@ function syncPracticeTolerancePipeline(): void {
   pipeline?.setPracticeTolerancePct(practiceTolerancePct / 100);
 }
 
+function syncPracticeCorrectionSourcePipeline(): void {
+  pipeline?.setPracticeCorrectionSource(practiceCorrectionSource);
+}
+
 function defaultPracticePeakMergeMs(bpm: number): number {
   return Math.round(clamp((60_000 / bpm) * 0.55, 180, 460) / 10) * 10;
+}
+
+function asPracticeCorrectionSource(value: string): TempoResponsivenessLabel {
+  return value === "Fast" || value === "Stable" ? value : "Balanced";
 }
 
 function buildCurrentNoteSnapshot(displayedMidi: number | null): NoteSnapshot | null {
@@ -1441,6 +1458,7 @@ async function onToggleListening(): Promise<void> {
     syncStringPurityPipeline();
     syncPracticePeakPickingPipeline();
     syncPracticeTolerancePipeline();
+    syncPracticeCorrectionSourcePipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
       resetMetronomeClock();

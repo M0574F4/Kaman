@@ -47,8 +47,10 @@ export type TempoDebugPoint = {
   peak: boolean;
 };
 
+export type TempoResponsivenessLabel = "Fast" | "Balanced" | "Stable";
+
 export type TempoResponsivenessEstimate = {
-  label: "Fast" | "Balanced" | "Stable";
+  label: TempoResponsivenessLabel;
   intervalCount: number;
   bpm: number | null;
   confidence: number;
