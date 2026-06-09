@@ -68,6 +68,8 @@ export class TempoEstimator {
   private lastRecentPeakEstimate: TempoEstimate | null = null;
   private lastAutocorrelationEstimate: TempoEstimate | null = null;
   private lastPeakEstimate: TempoEstimate | null = null;
+  private peakThreshold = 50;
+  private peakMergeMs: number | null = null;
 
   constructor(
     private readonly sampleRate: number,
@@ -79,6 +81,11 @@ export class TempoEstimator {
 
   setTargetBpm(targetBpm: number): void {
     this.opts.targetBpm = clamp(targetBpm, this.opts.minBpm, this.opts.maxBpm);
+  }
+
+  setPeakPickingOptions(peakThreshold: number, peakMergeMs: number): void {
+    this.peakThreshold = clamp(peakThreshold, 1, 100);
+    this.peakMergeMs = clamp(peakMergeMs, 80, 800);
   }
 
   reset(): void {
@@ -350,7 +357,7 @@ export class TempoEstimator {
       return null;
     }
 
-    const peaks = pickOnsetPeaks(activeSamples, this.onsetRefractoryMsForTarget());
+    const peaks = this.pickPeaks(activeSamples);
     const recentPeakEstimate = this.estimateFromRecentPeakSpacing(peaks, tMs);
     const autocorrelationEstimate = this.estimateFromAutocorrelation(centered);
     const peakEstimate = this.estimateFromOnsetPeaks(peaks);
@@ -371,7 +378,7 @@ export class TempoEstimator {
 
   private buildDebugFrame(tMs: number): TempoDebugFrame {
     const activeSamples = this.samples.filter((sample) => tMs - sample.tMs <= this.opts.windowMs);
-    const peaks = pickOnsetPeaks(activeSamples, this.onsetRefractoryMsForTarget());
+    const peaks = this.pickPeaks(activeSamples);
     const pointStep = Math.max(1, Math.ceil(activeSamples.length / 96));
     const decimated = activeSamples.filter((_, index) => index % pointStep === 0);
     const peakPointIndexes = new Set<number>();
@@ -410,6 +417,8 @@ export class TempoEstimator {
       activeRatio: this.lastActiveRatio,
       recentActiveRatio: this.lastRecentActiveRatio,
       peakCount: peaks.length,
+      peakThreshold: this.peakThreshold,
+      peakMergeMs: this.onsetRefractoryMsForTarget(),
       recentPeakBpm: this.lastRecentPeakEstimate?.bpm ?? null,
       recentPeakConfidence: this.lastRecentPeakEstimate?.confidence ?? 0,
       autocorrelationBpm: this.lastAutocorrelationEstimate?.bpm ?? null,
@@ -558,8 +567,19 @@ export class TempoEstimator {
   }
 
   private onsetRefractoryMsForTarget(): number {
+    if (this.peakMergeMs !== null) {
+      return this.peakMergeMs;
+    }
     const targetPeriodMs = 60_000 / this.opts.targetBpm;
-    return clamp(targetPeriodMs * 0.42, this.opts.onsetRefractoryMs, 260);
+    return clamp(targetPeriodMs * 0.55, 180, 460);
+  }
+
+  private pickPeaks(samples: NoveltySample[]): OnsetPeak[] {
+    return pickOnsetPeaks(samples, this.onsetRefractoryMsForTarget(), this.peakThresholdScale());
+  }
+
+  private peakThresholdScale(): number {
+    return 0.55 + this.peakThreshold * 0.009;
   }
 
   private stabilizeEstimate(next: TempoEstimate): TempoEstimate {
@@ -613,7 +633,11 @@ function normalizedLagCorrelation(values: number[], lag: number): number {
   return numerator / denominator;
 }
 
-function pickOnsetPeaks(samples: NoveltySample[], refractoryMs: number): OnsetPeak[] {
+function pickOnsetPeaks(
+  samples: NoveltySample[],
+  refractoryMs: number,
+  thresholdScale: number,
+): OnsetPeak[] {
   if (samples.length < 5) {
     return [];
   }
@@ -625,7 +649,7 @@ function pickOnsetPeaks(samples: NoveltySample[], refractoryMs: number): OnsetPe
   const stdDev = Math.sqrt(variance);
   const sorted = [...values].sort((a, b) => a - b);
   const percentile75 = sorted[Math.floor(sorted.length * 0.75)] ?? 0;
-  const threshold = Math.max(0.055, mean + stdDev * 0.45, percentile75 * 0.82);
+  const threshold = Math.max(0.055, mean + stdDev * 0.45, percentile75 * 0.82) * thresholdScale;
   const peaks: OnsetPeak[] = [];
 
   for (let i = 2; i < samples.length - 2; i += 1) {

@@ -104,6 +104,9 @@ let enableVisualMetronome = false;
 let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
+let practicePeakThreshold = 50;
+let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
+let practicePeakMergeTouched = false;
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
@@ -150,6 +153,8 @@ type UiRefs = {
   practiceStatus: HTMLDivElement;
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
+  practicePeakThresholdInput: HTMLInputElement;
+  practicePeakMergeInput: HTMLInputElement;
   practiceDebug: HTMLDivElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
@@ -250,6 +255,14 @@ function mountUi(): void {
             <div id="practice-status" class="practice-status status-idle">-</div>
             <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
+            <div class="practice-tuning">
+              <label>Peak threshold
+                <input id="practice-peak-threshold" type="range" min="1" max="100" step="1" value="50" />
+              </label>
+              <label>Merge ms
+                <input id="practice-peak-merge" type="number" min="80" max="800" step="10" value="320" />
+              </label>
+            </div>
             <div id="practice-debug" class="practice-debug"></div>
           </div>
           <div id="sequence-controls" class="sequence-controls">
@@ -325,6 +338,8 @@ function mountUi(): void {
   const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
+  const practicePeakThresholdInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-threshold");
+  const practicePeakMergeInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-merge");
   const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
@@ -369,6 +384,8 @@ function mountUi(): void {
     !practiceStatus ||
     !practiceEstimate ||
     !practiceDetail ||
+    !practicePeakThresholdInput ||
+    !practicePeakMergeInput ||
     !practiceDebug ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
@@ -416,6 +433,8 @@ function mountUi(): void {
     practiceStatus,
     practiceEstimate,
     practiceDetail,
+    practicePeakThresholdInput,
+    practicePeakMergeInput,
     practiceDebug,
     sequenceControls,
     sequenceSubmodeSelect,
@@ -494,7 +513,11 @@ function mountUi(): void {
     }
     sequenceSettings.bpm = nextBpm;
     resetPracticeEstimate(nextBpm);
+    if (!practicePeakMergeTouched) {
+      practicePeakMergeMs = defaultPracticePeakMergeMs(nextBpm);
+    }
     pipeline?.setPracticeTargetBpm(nextBpm);
+    syncPracticePeakPickingPipeline();
     pipeline?.resetTempo();
     collector.setSettings(sequenceSettings);
     resetMetronomeClock();
@@ -526,7 +549,11 @@ function mountUi(): void {
     }
     sequenceSettings.bpm = nextBpm;
     resetPracticeEstimate(nextBpm);
+    if (!practicePeakMergeTouched) {
+      practicePeakMergeMs = defaultPracticePeakMergeMs(nextBpm);
+    }
     pipeline?.setPracticeTargetBpm(nextBpm);
+    syncPracticePeakPickingPipeline();
     pipeline?.resetTempo();
     collector.setSettings(sequenceSettings);
     resetMetronomeClock();
@@ -539,6 +566,30 @@ function mountUi(): void {
 
   liveBpmDownBtn.addEventListener("click", () => {
     stepLiveBpm(-1);
+  });
+
+  practicePeakThresholdInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    practicePeakThreshold = clamp(parseInt(target.value || "50", 10), 1, 100);
+    syncPracticePeakPickingPipeline();
+    scheduleRender();
+  });
+
+  practicePeakMergeInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    practicePeakMergeMs = clamp(parseInt(target.value || "320", 10), 80, 800);
+    practicePeakMergeTouched = true;
+    syncPracticePeakPickingPipeline();
+    scheduleRender();
+  });
+
+  practicePeakMergeInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    practicePeakMergeMs = clamp(parseInt(target.value || "320", 10), 80, 800);
+    practicePeakMergeTouched = true;
+    target.value = String(practicePeakMergeMs);
+    syncPracticePeakPickingPipeline();
+    scheduleRender();
   });
 
   timeSignatureSelect.addEventListener("change", (event) => {
@@ -667,6 +718,12 @@ function render(): void {
   }
   if (activeElement !== ui.bpmInput) {
     ui.bpmInput.value = String(sequenceSettings.bpm);
+  }
+  if (activeElement !== ui.practicePeakThresholdInput) {
+    ui.practicePeakThresholdInput.value = String(practicePeakThreshold);
+  }
+  if (activeElement !== ui.practicePeakMergeInput) {
+    ui.practicePeakMergeInput.value = String(practicePeakMergeMs);
   }
   ui.timeSignatureSelect.value = sequenceSettings.timeSignature;
   ui.beatUnitSelect.value = beatUnit;
@@ -910,7 +967,7 @@ function renderPracticeDebug(): string {
       <div class="practice-debug-cell">
         <span>Peaks</span>
         <strong>${debug.peakCount}</strong>
-        <small>recent spacing ${recentPeakBpm} BPM (${(debug.recentPeakConfidence * 100).toFixed(0)}%) | window ${peakBpm} BPM</small>
+        <small>recent spacing ${recentPeakBpm} BPM (${(debug.recentPeakConfidence * 100).toFixed(0)}%) | window ${peakBpm} BPM | threshold ${debug.peakThreshold} | merge ${Math.round(debug.peakMergeMs)} ms</small>
       </div>
       <div class="practice-debug-cell">
         <span>Periodicity</span>
@@ -981,6 +1038,14 @@ function isStringPurityActive(): boolean {
 
 function syncStringPurityPipeline(): void {
   pipeline?.setStringPurityEnabled(isStringPurityActive());
+}
+
+function syncPracticePeakPickingPipeline(): void {
+  pipeline?.setPracticePeakPicking(practicePeakThreshold, practicePeakMergeMs);
+}
+
+function defaultPracticePeakMergeMs(bpm: number): number {
+  return Math.round(clamp((60_000 / bpm) * 0.55, 180, 460) / 10) * 10;
 }
 
 function buildCurrentNoteSnapshot(displayedMidi: number | null): NoteSnapshot | null {
@@ -1284,6 +1349,7 @@ async function onToggleListening(): Promise<void> {
       sequenceSettings.bpm,
     );
     syncStringPurityPipeline();
+    syncPracticePeakPickingPipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
       resetMetronomeClock();
