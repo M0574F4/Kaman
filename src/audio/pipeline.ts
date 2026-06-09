@@ -8,7 +8,6 @@ export type PipelineHandle = {
   setStringPurityEnabled: (enabled: boolean) => void;
   setPracticeTargetBpm: (bpm: number) => void;
   setPracticePeakPicking: (peakThreshold: number, peakMergeMs: number) => void;
-  setPracticeResponsiveness: (intervalCount: number) => void;
   resetTempo: () => void;
 };
 
@@ -70,9 +69,6 @@ export function startPitchPipeline(
     },
     setPracticePeakPicking: (peakThreshold: number, peakMergeMs: number) => {
       tempoEstimator.setPeakPickingOptions(peakThreshold, peakMergeMs);
-    },
-    setPracticeResponsiveness: (intervalCount: number) => {
-      tempoEstimator.setResponsivenessIntervals(intervalCount);
     },
     resetTempo: () => {
       tempoEstimator.reset();

@@ -1,4 +1,10 @@
-import type { PitchFrame, TempoDebugFrame, TempoFrame, TempoStatus } from "./types";
+import type {
+  PitchFrame,
+  TempoDebugFrame,
+  TempoFrame,
+  TempoResponsivenessEstimate,
+  TempoStatus,
+} from "./types";
 
 type TempoEstimatorOptions = {
   targetBpm: number;
@@ -43,6 +49,10 @@ type TempoEstimate = {
   confidence: number;
 };
 
+type IntervalTempoEstimate = TempoEstimate & {
+  intervalsMs: number[];
+};
+
 type OnsetPeak = {
   tMs: number;
   value: number;
@@ -70,10 +80,10 @@ export class TempoEstimator {
   private lastPeakEstimate: TempoEstimate | null = null;
   private peakThreshold = 50;
   private peakMergeMs: number | null = null;
-  private responsivenessIntervals = 4;
   private peakScanIndex = 2;
   private events: OnsetPeak[] = [];
   private lastRecentIntervalsMs: number[] = [];
+  private lastResponsivenessEstimates: TempoResponsivenessEstimate[] = emptyResponsivenessEstimates();
 
   constructor(
     private readonly sampleRate: number,
@@ -90,10 +100,6 @@ export class TempoEstimator {
   setPeakPickingOptions(peakThreshold: number, peakMergeMs: number): void {
     this.peakThreshold = clamp(peakThreshold, 1, 100);
     this.peakMergeMs = clamp(peakMergeMs, 80, 800);
-  }
-
-  setResponsivenessIntervals(intervalCount: number): void {
-    this.responsivenessIntervals = Math.round(clamp(intervalCount, 2, 8));
   }
 
   reset(): void {
@@ -118,6 +124,7 @@ export class TempoEstimator {
     this.peakScanIndex = 2;
     this.events = [];
     this.lastRecentIntervalsMs = [];
+    this.lastResponsivenessEstimates = emptyResponsivenessEstimates();
   }
 
   process(
@@ -384,6 +391,7 @@ export class TempoEstimator {
     this.lastPeakEstimate = null;
     this.lastRecentPeakEstimate = null;
     this.lastRecentIntervalsMs = [];
+    this.lastResponsivenessEstimates = emptyResponsivenessEstimates();
 
     const inactiveResetMs = clamp((60_000 / this.opts.targetBpm) * 1.45, 900, 2600);
     if (this.lastActiveMs === null || tMs - this.lastActiveMs > inactiveResetMs) {
@@ -411,7 +419,18 @@ export class TempoEstimator {
     }
 
     const eventWindow = this.events.filter((event) => tMs - event.tMs <= this.opts.windowMs);
-    const recentPeakEstimate = this.estimateFromRecentPeakSpacing(eventWindow, tMs);
+    this.lastResponsivenessEstimates = this.buildResponsivenessEstimates(eventWindow, tMs);
+    const balancedEstimate = this.lastResponsivenessEstimates.find(
+      (estimate) => estimate.label === "Balanced",
+    );
+    const recentPeakEstimate =
+      balancedEstimate && balancedEstimate.bpm !== null
+        ? {
+            bpm: balancedEstimate.bpm,
+            confidence: balancedEstimate.confidence,
+          }
+        : null;
+    this.lastRecentIntervalsMs = balancedEstimate?.intervalsMs ?? [];
     this.lastRecentPeakEstimate = recentPeakEstimate;
     if (recentPeakEstimate && recentPeakEstimate.confidence >= 0.24) {
       return this.stabilizeEstimate(recentPeakEstimate);
@@ -490,8 +509,14 @@ export class TempoEstimator {
       peakCount: events.length,
       peakThreshold: this.peakThreshold,
       peakMergeMs: this.onsetRefractoryMsForTarget(),
-      responsivenessIntervals: this.responsivenessIntervals,
       recentIntervalsMs: [...this.lastRecentIntervalsMs],
+      responsivenessEstimates: this.lastResponsivenessEstimates.map((estimate) => ({
+        label: estimate.label,
+        intervalCount: estimate.intervalCount,
+        bpm: estimate.bpm,
+        confidence: estimate.confidence,
+        intervalsMs: [...estimate.intervalsMs],
+      })),
       recentPeakBpm: this.lastRecentPeakEstimate?.bpm ?? null,
       recentPeakConfidence: this.lastRecentPeakEstimate?.confidence ?? 0,
       autocorrelationBpm: this.lastAutocorrelationEstimate?.bpm ?? null,
@@ -560,12 +585,37 @@ export class TempoEstimator {
     return { bpm: bestBpm, confidence };
   }
 
-  private estimateFromRecentPeakSpacing(peaks: OnsetPeak[], tMs: number): TempoEstimate | null {
+  private buildResponsivenessEstimates(
+    peaks: OnsetPeak[],
+    tMs: number,
+  ): TempoResponsivenessEstimate[] {
+    const definitions: Array<{ label: TempoResponsivenessEstimate["label"]; intervalCount: number }> = [
+      { label: "Fast", intervalCount: 2 },
+      { label: "Balanced", intervalCount: 4 },
+      { label: "Stable", intervalCount: 6 },
+    ];
+
+    return definitions.map(({ label, intervalCount }) => {
+      const estimate = this.estimateFromRecentPeakSpacing(peaks, tMs, intervalCount);
+      return {
+        label,
+        intervalCount,
+        bpm: estimate?.bpm ?? null,
+        confidence: estimate?.confidence ?? 0,
+        intervalsMs: estimate?.intervalsMs ?? [],
+      };
+    });
+  }
+
+  private estimateFromRecentPeakSpacing(
+    peaks: OnsetPeak[],
+    tMs: number,
+    intervalCount: number,
+  ): IntervalTempoEstimate | null {
     const recentPeaks = peaks
       .filter((peak) => tMs - peak.tMs <= 4200)
-      .slice(-(this.responsivenessIntervals + 1));
+      .slice(-(intervalCount + 1));
     if (recentPeaks.length < 3) {
-      this.lastRecentIntervalsMs = [];
       return null;
     }
 
@@ -577,11 +627,10 @@ export class TempoEstimator {
       }
     }
     if (intervals.length < 2) {
-      this.lastRecentIntervalsMs = intervals;
       return null;
     }
 
-    this.lastRecentIntervalsMs = intervals.slice(-this.responsivenessIntervals);
+    const intervalsMs = intervals.slice(-intervalCount);
     const medianIntervalMs = median(intervals);
     const deviations = intervals.map((intervalMs) => Math.abs(intervalMs - medianIntervalMs));
     const medianDeviationMs = median(deviations);
@@ -589,11 +638,11 @@ export class TempoEstimator {
     const bpm = normalizeBpmToRange(60_000 / medianIntervalMs, this.opts.minBpm, this.opts.maxBpm);
     const strength =
       recentPeaks.reduce((sum, peak) => sum + peak.value, 0) / recentPeaks.length;
-    const countScore = clamp01((intervals.length - 1) / Math.max(1, this.responsivenessIntervals - 1));
+    const countScore = clamp01((intervals.length - 1) / Math.max(1, intervalCount - 1));
     const consistencyScore = clamp01(1 - relativeDeviation / 0.28);
     const confidence = clamp01(0.14 + countScore * 0.34 + consistencyScore * 0.38 + strength * 0.22);
 
-    return { bpm, confidence };
+    return { bpm, confidence, intervalsMs };
   }
 
   private onsetIntervalScore(peaks: OnsetPeak[], bpm: number): number {
@@ -766,6 +815,14 @@ function normalizeBpmToRange(bpm: number, minBpm: number, maxBpm: number): numbe
     normalized /= 2;
   }
   return clamp(normalized, minBpm, maxBpm);
+}
+
+function emptyResponsivenessEstimates(): TempoResponsivenessEstimate[] {
+  return [
+    { label: "Fast", intervalCount: 2, bpm: null, confidence: 0, intervalsMs: [] },
+    { label: "Balanced", intervalCount: 4, bpm: null, confidence: 0, intervalsMs: [] },
+    { label: "Stable", intervalCount: 6, bpm: null, confidence: 0, intervalsMs: [] },
+  ];
 }
 
 function statusForEstimate(

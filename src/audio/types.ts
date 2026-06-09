@@ -47,6 +47,14 @@ export type TempoDebugPoint = {
   peak: boolean;
 };
 
+export type TempoResponsivenessEstimate = {
+  label: "Fast" | "Balanced" | "Stable";
+  intervalCount: number;
+  bpm: number | null;
+  confidence: number;
+  intervalsMs: number[];
+};
+
 export type TempoDebugFrame = {
   rms: number;
   noiseFloorRms: number;
@@ -58,8 +66,8 @@ export type TempoDebugFrame = {
   peakCount: number;
   peakThreshold: number;
   peakMergeMs: number;
-  responsivenessIntervals: number;
   recentIntervalsMs: number[];
+  responsivenessEstimates: TempoResponsivenessEstimate[];
   recentPeakBpm: number | null;
   recentPeakConfidence: number;
   autocorrelationBpm: number | null;

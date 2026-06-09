@@ -107,7 +107,6 @@ let minBleedScore = 0.14;
 let practicePeakThreshold = 50;
 let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
 let practicePeakMergeTouched = false;
-let practiceResponsivenessIntervals = 4;
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
@@ -156,7 +155,6 @@ type UiRefs = {
   practiceDetail: HTMLParagraphElement;
   practicePeakThresholdInput: HTMLInputElement;
   practicePeakMergeInput: HTMLInputElement;
-  practiceResponsivenessSelect: HTMLSelectElement;
   practiceDebug: HTMLDivElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
@@ -264,13 +262,6 @@ function mountUi(): void {
               <label>Merge ms
                 <input id="practice-peak-merge" type="number" min="80" max="800" step="10" value="320" />
               </label>
-              <label>Response
-                <select id="practice-responsiveness">
-                  <option value="2">Fast</option>
-                  <option value="4" selected>Balanced</option>
-                  <option value="6">Stable</option>
-                </select>
-              </label>
             </div>
             <div id="practice-debug" class="practice-debug"></div>
           </div>
@@ -349,7 +340,6 @@ function mountUi(): void {
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
   const practicePeakThresholdInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-threshold");
   const practicePeakMergeInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-merge");
-  const practiceResponsivenessSelect = appRoot.querySelector<HTMLSelectElement>("#practice-responsiveness");
   const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
@@ -396,7 +386,6 @@ function mountUi(): void {
     !practiceDetail ||
     !practicePeakThresholdInput ||
     !practicePeakMergeInput ||
-    !practiceResponsivenessSelect ||
     !practiceDebug ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
@@ -446,7 +435,6 @@ function mountUi(): void {
     practiceDetail,
     practicePeakThresholdInput,
     practicePeakMergeInput,
-    practiceResponsivenessSelect,
     practiceDebug,
     sequenceControls,
     sequenceSubmodeSelect,
@@ -607,14 +595,6 @@ function mountUi(): void {
     scheduleRender();
   });
 
-  practiceResponsivenessSelect.addEventListener("change", (event) => {
-    const target = event.target as HTMLSelectElement;
-    practiceResponsivenessIntervals = asPracticeResponsivenessIntervals(target.value);
-    syncPracticeResponsivenessPipeline();
-    pipeline?.resetTempo();
-    scheduleRender();
-  });
-
   timeSignatureSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     sequenceSettings.timeSignature = asTimeSignature(target.value);
@@ -748,7 +728,6 @@ function render(): void {
   if (activeElement !== ui.practicePeakMergeInput) {
     ui.practicePeakMergeInput.value = String(practicePeakMergeMs);
   }
-  ui.practiceResponsivenessSelect.value = String(practiceResponsivenessIntervals);
   ui.timeSignatureSelect.value = sequenceSettings.timeSignature;
   ui.beatUnitSelect.value = beatUnit;
   ui.beatUnitSelect.disabled = sequenceSubMode === "single-beat";
@@ -973,6 +952,22 @@ function renderPracticeDebug(): string {
     debug.recentIntervalsMs.length === 0
       ? "-"
       : debug.recentIntervalsMs.map((intervalMs) => `${Math.round(intervalMs)}ms`).join(", ");
+  const responseCards = debug.responsivenessEstimates
+    .map((estimate) => {
+      const bpmText = estimate.bpm === null ? "-" : `${Math.round(estimate.bpm)}`;
+      const intervalsText =
+        estimate.intervalsMs.length === 0
+          ? "-"
+          : estimate.intervalsMs.map((intervalMs) => `${Math.round(intervalMs)}`).join(", ");
+      return `
+        <div class="practice-response-card">
+          <span>${estimate.label}</span>
+          <strong>${bpmText} BPM</strong>
+          <small>${estimate.intervalCount} intervals | ${(estimate.confidence * 100).toFixed(0)}% | ${intervalsText} ms</small>
+        </div>
+      `;
+    })
+    .join("");
 
   return `
     <div class="practice-debug-grid">
@@ -1004,8 +999,9 @@ function renderPracticeDebug(): string {
       </div>
       <div class="practice-debug-cell wide">
         <span>Committed intervals</span>
-        <strong>${debug.responsivenessIntervals} interval${debug.responsivenessIntervals === 1 ? "" : "s"}</strong>
-        <small>${intervalText}</small>
+        <strong>Balanced: ${intervalText}</strong>
+        <small>main estimate uses Balanced; compare all three below</small>
+        <div class="practice-response-grid">${responseCards}</div>
       </div>
     </div>
     ${renderNoveltyTrace(debug.points)}
@@ -1077,19 +1073,8 @@ function syncPracticePeakPickingPipeline(): void {
   pipeline?.setPracticePeakPicking(practicePeakThreshold, practicePeakMergeMs);
 }
 
-function syncPracticeResponsivenessPipeline(): void {
-  pipeline?.setPracticeResponsiveness(practiceResponsivenessIntervals);
-}
-
 function defaultPracticePeakMergeMs(bpm: number): number {
   return Math.round(clamp((60_000 / bpm) * 0.55, 180, 460) / 10) * 10;
-}
-
-function asPracticeResponsivenessIntervals(value: string): number {
-  const parsed = parseInt(value, 10);
-  if (parsed <= 2) return 2;
-  if (parsed >= 6) return 6;
-  return 4;
 }
 
 function buildCurrentNoteSnapshot(displayedMidi: number | null): NoteSnapshot | null {
@@ -1394,7 +1379,6 @@ async function onToggleListening(): Promise<void> {
     );
     syncStringPurityPipeline();
     syncPracticePeakPickingPipeline();
-    syncPracticeResponsivenessPipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
       resetMetronomeClock();
