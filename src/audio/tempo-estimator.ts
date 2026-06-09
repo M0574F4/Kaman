@@ -29,7 +29,7 @@ const DEFAULT_OPTIONS: TempoEstimatorOptions = {
   sampleStepMs: 20,
   windowMs: 8000,
   minWindowMs: 2800,
-  tolerancePct: 0.055,
+  tolerancePct: 0.08,
   minConfidence: 0.16,
   onsetRefractoryMs: 95,
   minSignalRms: 0.012,
@@ -100,6 +100,10 @@ export class TempoEstimator {
   setPeakPickingOptions(peakThreshold: number, peakMergeMs: number): void {
     this.peakThreshold = clamp(peakThreshold, 1, 100);
     this.peakMergeMs = clamp(peakMergeMs, 80, 800);
+  }
+
+  setTolerancePct(tolerancePct: number): void {
+    this.opts.tolerancePct = clamp(tolerancePct, 0.01, 0.3);
   }
 
   reset(): void {

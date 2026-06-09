@@ -392,6 +392,39 @@ button.primary {
   color: #6b756e;
 }
 
+.practice-minimal-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  margin-top: 0.62rem;
+}
+
+.practice-minimal-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #4f5d5e;
+  font-size: 0.82rem;
+}
+
+.practice-minimal-controls input[type="number"] {
+  width: 4.8rem;
+  min-width: 0;
+  border: 1px solid #d2c4af;
+  border-radius: 8px;
+  padding: 0.34rem 0.42rem;
+  font-size: 0.86rem;
+}
+
+.practice-debug-toggle {
+  margin-left: auto;
+}
+
+.practice-debug-section {
+  display: none;
+}
+
 .practice-tuning {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 7.5rem;

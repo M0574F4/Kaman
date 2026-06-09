@@ -107,6 +107,8 @@ let minBleedScore = 0.14;
 let practicePeakThreshold = 50;
 let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
 let practicePeakMergeTouched = false;
+let practiceTolerancePct = 8;
+let showPracticeDebug = false;
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let beatToleranceMs = 80;
@@ -153,7 +155,11 @@ type UiRefs = {
   practiceStatus: HTMLDivElement;
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
+  practiceToleranceInput: HTMLInputElement;
+  practiceDebugToggle: HTMLInputElement;
+  practiceDebugSection: HTMLDivElement;
   practicePeakThresholdInput: HTMLInputElement;
+  practicePeakThresholdValue: HTMLSpanElement;
   practicePeakMergeInput: HTMLInputElement;
   practiceDebug: HTMLDivElement;
   sequenceControls: HTMLDivElement;
@@ -255,15 +261,26 @@ function mountUi(): void {
             <div id="practice-status" class="practice-status status-idle">-</div>
             <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
-            <div class="practice-tuning">
-              <label>Peak threshold
-                <input id="practice-peak-threshold" type="range" min="1" max="100" step="1" value="50" />
+            <div class="practice-minimal-controls">
+              <label>Tolerance %
+                <input id="practice-tolerance" type="number" min="1" max="30" step="1" value="8" />
               </label>
-              <label>Merge ms
-                <input id="practice-peak-merge" type="number" min="80" max="800" step="10" value="320" />
+              <label class="practice-debug-toggle" for="practice-debug-toggle">
+                <input id="practice-debug-toggle" type="checkbox" />
+                Show tempo diagnostics
               </label>
             </div>
-            <div id="practice-debug" class="practice-debug"></div>
+            <div id="practice-debug-section" class="practice-debug-section">
+              <div class="practice-tuning">
+                <label>Peak threshold <span id="practice-peak-threshold-value">50</span>
+                  <input id="practice-peak-threshold" type="range" min="1" max="100" step="1" value="50" />
+                </label>
+                <label>Merge ms
+                  <input id="practice-peak-merge" type="number" min="80" max="800" step="10" value="320" />
+                </label>
+              </div>
+              <div id="practice-debug" class="practice-debug"></div>
+            </div>
           </div>
           <div id="sequence-controls" class="sequence-controls">
             <label>Submode
@@ -338,7 +355,11 @@ function mountUi(): void {
   const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
+  const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
+  const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
+  const practiceDebugSection = appRoot.querySelector<HTMLDivElement>("#practice-debug-section");
   const practicePeakThresholdInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-threshold");
+  const practicePeakThresholdValue = appRoot.querySelector<HTMLSpanElement>("#practice-peak-threshold-value");
   const practicePeakMergeInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-merge");
   const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
@@ -384,7 +405,11 @@ function mountUi(): void {
     !practiceStatus ||
     !practiceEstimate ||
     !practiceDetail ||
+    !practiceToleranceInput ||
+    !practiceDebugToggle ||
+    !practiceDebugSection ||
     !practicePeakThresholdInput ||
+    !practicePeakThresholdValue ||
     !practicePeakMergeInput ||
     !practiceDebug ||
     !sequenceControls ||
@@ -433,7 +458,11 @@ function mountUi(): void {
     practiceStatus,
     practiceEstimate,
     practiceDetail,
+    practiceToleranceInput,
+    practiceDebugToggle,
+    practiceDebugSection,
     practicePeakThresholdInput,
+    practicePeakThresholdValue,
     practicePeakMergeInput,
     practiceDebug,
     sequenceControls,
@@ -566,6 +595,27 @@ function mountUi(): void {
 
   liveBpmDownBtn.addEventListener("click", () => {
     stepLiveBpm(-1);
+  });
+
+  practiceToleranceInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    practiceTolerancePct = clamp(parseInt(target.value || "8", 10), 1, 30);
+    syncPracticeTolerancePipeline();
+    scheduleRender();
+  });
+
+  practiceToleranceInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    practiceTolerancePct = clamp(parseInt(target.value || "8", 10), 1, 30);
+    target.value = String(practiceTolerancePct);
+    syncPracticeTolerancePipeline();
+    scheduleRender();
+  });
+
+  practiceDebugToggle.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    showPracticeDebug = target.checked;
+    scheduleRender();
   });
 
   practicePeakThresholdInput.addEventListener("input", (event) => {
@@ -722,9 +772,15 @@ function render(): void {
   if (activeElement !== ui.bpmInput) {
     ui.bpmInput.value = String(sequenceSettings.bpm);
   }
+  if (activeElement !== ui.practiceToleranceInput) {
+    ui.practiceToleranceInput.value = String(practiceTolerancePct);
+  }
+  ui.practiceDebugToggle.checked = showPracticeDebug;
+  ui.practiceDebugSection.style.display = showPracticeDebug ? "block" : "none";
   if (activeElement !== ui.practicePeakThresholdInput) {
     ui.practicePeakThresholdInput.value = String(practicePeakThreshold);
   }
+  ui.practicePeakThresholdValue.textContent = String(practicePeakThreshold);
   if (activeElement !== ui.practicePeakMergeInput) {
     ui.practicePeakMergeInput.value = String(practicePeakMergeMs);
   }
@@ -914,7 +970,7 @@ function renderPracticePanel(): void {
   ui.practiceEstimate.textContent =
     `Target ${practice.targetBpm} BPM | estimated ${estimatedText}${diffText}`;
   ui.practiceDetail.textContent =
-    `Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
+    `Tolerance ±${practiceTolerancePct}% | Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
 }
 
@@ -927,6 +983,7 @@ function renderPracticeSummary(): string {
     `Estimated BPM: ${estimate}`,
     `Difference: ${diff}`,
     `Feedback: ${practiceStatusLabel(practice.status, state.listening)}`,
+    `Tolerance: ±${practiceTolerancePct}%`,
     `Confidence: ${(practice.confidence * 100).toFixed(0)}%`,
     "",
     "The estimator listens for repeated changes in tone, energy, and spectrum. If the bowing is too smooth or the pulse is unclear, it will wait instead of guessing.",
@@ -1071,6 +1128,10 @@ function syncStringPurityPipeline(): void {
 
 function syncPracticePeakPickingPipeline(): void {
   pipeline?.setPracticePeakPicking(practicePeakThreshold, practicePeakMergeMs);
+}
+
+function syncPracticeTolerancePipeline(): void {
+  pipeline?.setPracticeTolerancePct(practiceTolerancePct / 100);
 }
 
 function defaultPracticePeakMergeMs(bpm: number): number {
@@ -1379,6 +1440,7 @@ async function onToggleListening(): Promise<void> {
     );
     syncStringPurityPipeline();
     syncPracticePeakPickingPipeline();
+    syncPracticeTolerancePipeline();
     if (enableMetronomeSound) {
       await ensureSharedAudioContext();
       resetMetronomeClock();
