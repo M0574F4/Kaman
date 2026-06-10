@@ -94,6 +94,7 @@ type PracticePatternNote = {
 type PracticePattern = {
   id: string;
   name: string;
+  defaultLoop: boolean;
   notes: PracticePatternNote[];
 };
 
@@ -106,6 +107,7 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
   {
     id: "warmup1",
     name: "Warmup 1",
+    defaultLoop: true,
     notes: [
       ...makeWarmupGroup(62, "Re", "S1"),
       ...makeWarmupGroup(69, "La", "S2"),
@@ -146,9 +148,11 @@ let practiceTolerancePct = 8;
 let showPracticeDebug = false;
 let practiceCorrectionSource: TempoResponsivenessLabel = "Balanced";
 let selectedPracticePatternId = PRACTICE_PATTERNS[0].id;
+let practicePatternLoopEnabled = PRACTICE_PATTERNS[0].defaultLoop;
 let practicePatternPlaying = false;
 let practicePatternStartedAtMs = 0;
 let practicePatternActiveIndex: number | null = null;
+let practicePatternCycleIndex = 0;
 let practicePatternStopTimer: number | null = null;
 let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
 let sequenceSubMode: SequenceSubMode = "single-beat";
