@@ -186,7 +186,7 @@ const TRAIL_DURATION_MS = 1400;
 const TRAIL_START_LEFT_PCT = 58;
 const TRAIL_END_LEFT_PCT = 2;
 const BATCH_FADE_MS = 1700;
-const PRACTICE_PATTERN_NOTES_PER_ROW = 8;
+const PRACTICE_PATTERN_NOTES_PER_ROW = 16;
 
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
@@ -307,7 +307,7 @@ type UiRefs = {
   stringPurityToggle: HTMLInputElement;
   exactToggle: HTMLInputElement;
   trailToggle: HTMLInputElement;
-  captureHint: HTMLParagraphElement;
+  captureHint: HTMLElement;
   noteMetric: HTMLParagraphElement;
   bleedNoteLine: HTMLParagraphElement;
   liveMetaLine: HTMLParagraphElement;
@@ -331,20 +331,19 @@ let ui: UiRefs | null = null;
 function mountUi(): void {
   appRoot.innerHTML = `
     <main class="panel">
-      <h1>Kaman Practice MVP</h1>
+      <h1>Practice</h1>
       <div class="controls">
         <button id="listen-btn" class="primary">Start Listening</button>
         <select id="mode-select" aria-label="Mode">
-          <option value="live">Live Mode</option>
-          <option value="practice">Practice Mode</option>
-          <option value="sequence">Sequence Mode</option>
-          <option value="sheet-entry">Sheet Note Entry</option>
-          <option value="spectrum">Spectrum Mode</option>
+          <option value="live">Live</option>
+          <option value="practice">Practice</option>
+          <option value="sequence">Sequence</option>
+          <option value="sheet-entry">Sheet Entry</option>
+          <option value="spectrum">Spectrum</option>
         </select>
+        <span id="capture-hint" class="muted mode-hint"></span>
         <button id="record-btn" disabled>Start Capture</button>
       </div>
-
-      <p id="capture-hint" class="muted"></p>
 
       <div class="grid">
         <section class="card visual-card">
@@ -395,8 +394,8 @@ function mountUi(): void {
                 <div id="practice-status" class="practice-status status-idle">-</div>
               </div>
               <div class="practice-feedback-card overall">
-                <span>Round feedback</span>
-                <div id="practice-overall-feedback" class="practice-overall-feedback">Play a full round to get pattern feedback.</div>
+                <span>Round</span>
+                <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
               </div>
             </div>
             <div class="practice-pattern-controls">
@@ -511,27 +510,27 @@ function mountUi(): void {
             </label>
             <button id="note-entry-clear" type="button">Clear</button>
           </div>
-          <label class="toggle-row" for="exact-pitch-toggle">
+          <label class="toggle-row practice-hidden-control" for="exact-pitch-toggle">
             <input id="exact-pitch-toggle" type="checkbox" />
-            Show exact intonation offset on staff (unquantized live placement)
+            Exact intonation
           </label>
-          <label class="toggle-row" for="trail-toggle">
+          <label class="toggle-row practice-hidden-control" for="trail-toggle">
             <input id="trail-toggle" type="checkbox" checked />
-            Enable note fade trail animation
+            Fade trail
           </label>
-          <label class="toggle-row" for="string-purity-toggle">
+          <label class="toggle-row practice-hidden-control" for="string-purity-toggle">
             <input id="string-purity-toggle" type="checkbox" />
-            Detect adjacent-string bleed (experimental)
+            String bleed
             <span class="bleed-threshold-group">
-              Min bleed score
+              score
               <input id="bleed-threshold-input" type="number" min="0.05" max="0.49" step="0.01" value="0.14" />
             </span>
           </label>
-          <label class="toggle-row compact" for="visual-metronome-toggle">
+          <label class="toggle-row compact practice-hidden-control" for="visual-metronome-toggle">
             <input id="visual-metronome-toggle" type="checkbox" />
             Visual metronome
           </label>
-          <label class="toggle-row compact" for="sound-metronome-toggle">
+          <label class="toggle-row compact practice-hidden-control" for="sound-metronome-toggle">
             <input id="sound-metronome-toggle" type="checkbox" />
             Metronome sound
           </label>
@@ -590,7 +589,7 @@ function mountUi(): void {
   const stringPurityToggle = appRoot.querySelector<HTMLInputElement>("#string-purity-toggle");
   const exactToggle = appRoot.querySelector<HTMLInputElement>("#exact-pitch-toggle");
   const trailToggle = appRoot.querySelector<HTMLInputElement>("#trail-toggle");
-  const captureHint = appRoot.querySelector<HTMLParagraphElement>("#capture-hint");
+  const captureHint = appRoot.querySelector<HTMLElement>("#capture-hint");
   const noteMetric = appRoot.querySelector<HTMLParagraphElement>("#note-metric");
   const bleedNoteLine = appRoot.querySelector<HTMLParagraphElement>("#bleed-note-line");
   const liveMetaLine = appRoot.querySelector<HTMLParagraphElement>("#live-meta-line");
@@ -1078,11 +1077,12 @@ function render(): void {
   ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
   ui.noteEntryControls.style.display = state.mode === "sheet-entry" ? "grid" : "none";
+  ui.outputTitle.style.display = state.mode === "practice" ? "none" : "";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
       : state.mode === "practice"
-        ? "Practice Output"
+        ? ""
         : state.mode === "sheet-entry"
           ? "Sheet Note Entry"
           : state.mode === "live"
@@ -1147,32 +1147,29 @@ function render(): void {
   const confText = `${(state.live.confidence * 100).toFixed(0)}%`;
   const centsLine = state.live.cents === null ? "cents: -" : `cents: ${formatSigned(state.live.cents)}`;
   ui.liveMetaLine.textContent = `${freqText} | ${confText} | ${centsLine} | ${statusText}`;
+  ui.liveMetaLine.style.display = state.mode === "practice" ? "none" : "";
   renderPracticePanel();
-  ui.purityMetaLine.style.display = stringPurityActive ? "" : "none";
+  ui.purityMetaLine.style.display = stringPurityActive && state.mode !== "practice" ? "" : "none";
   if (stringPurityActive) {
     ui.purityMetaLine.textContent = formatStringPurityLine(lastFrame);
   }
 
   if (state.mode === "live") {
-    ui.captureHint.textContent = "Live Mode: intonation feedback only.";
+    ui.captureHint.textContent = "Live intonation";
   } else if (state.mode === "practice") {
-    ui.captureHint.textContent =
-      "Practice Mode: set target BPM, play a steady pulse, and watch tempo feedback.";
+    ui.captureHint.textContent = "Pattern + pulse";
   } else if (state.mode === "spectrum") {
-    ui.captureHint.textContent =
-      "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
+    ui.captureHint.textContent = "Spectrum";
   } else if (state.mode === "sheet-entry") {
-    ui.captureHint.textContent =
-      "Sheet Note Entry: click fixed staff slots to build a pitch sequence.";
+    ui.captureHint.textContent = "Click notes";
   } else if (sequenceSubMode === "single-beat") {
-    ui.captureHint.textContent =
-      "Single Beat Drill: use Start/Stop Single Beat Drill only; mic starts/stops automatically.";
+    ui.captureHint.textContent = "Single beat drill";
   } else if (state.recording) {
-    ui.captureHint.textContent = "Phrase recording in progress. Stop capture to finalize the phrase.";
+    ui.captureHint.textContent = "Recording phrase";
   } else if (state.listening) {
-    ui.captureHint.textContent = "Phrase mode ready: use Start/Stop Phrase Capture; mic is managed automatically.";
+    ui.captureHint.textContent = "Phrase ready";
   } else {
-    ui.captureHint.textContent = "Sequence Mode: one Start/Stop button controls both capture and mic.";
+    ui.captureHint.textContent = "Sequence capture";
   }
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
@@ -1696,13 +1693,12 @@ function practicePatternReadoutText(): string {
     return `Count-in ${countInRemaining}`;
   }
   if (practicePatternActiveIndex !== null) {
-    const direction = practicePatternPassDirection(practicePatternCycleIndex);
-    return `${direction === "backward" ? "Backward" : "Forward"} round, note ${practicePatternActiveIndex + 1} of ${pattern.notes.length}`;
+    return `${practicePatternActiveIndex + 1}/${pattern.notes.length}`;
   }
   if (!practicePatternPlaying && practicePatternPassSummary) {
-    return `${practicePatternPassSummary.direction === "backward" ? "Backward" : "Forward"} round complete`;
+    return "Done";
   }
-  return `${pattern.notes.length} notes ready`;
+  return "Ready";
 }
 
 function practicePatternCountInRemainingBeats(nowMs: number): number | null {
@@ -1751,15 +1747,15 @@ function renderPracticePanel(): void {
   ui.practiceOverallFeedback.textContent = practicePatternOverallFeedbackText();
 
   const estimatedText =
-    practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
+    practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)}`;
   const diffText =
     practice.differenceBpm === null
       ? ""
-      : ` | ${formatSigned(practice.differenceBpm)} BPM`;
+      : ` ${formatSigned(practice.differenceBpm)}`;
   ui.practiceEstimate.textContent =
-    `Target ${practice.targetBpm} BPM | estimated ${estimatedText}${diffText}`;
+    `${practice.targetBpm} bpm target · ${estimatedText}${diffText} · conf ${(practice.confidence * 100).toFixed(0)}% · signal ${(practice.novelty * 100).toFixed(0)}%`;
   ui.practiceDetail.textContent =
-    `Correction ${practiceCorrectionSource} | Tolerance ±${practiceTolerancePct}% | Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
+    `±${practiceTolerancePct}% · ${practiceCorrectionSource}`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
 }
 
@@ -1767,16 +1763,16 @@ function practicePatternOverallFeedbackText(): string {
   const summary = practicePatternPassSummary;
   if (!summary) {
     return practicePatternPlaying
-      ? "Finish the current round to get pattern feedback."
-      : "Play a full round to get pattern feedback.";
+      ? "Finish round"
+      : "After first pass";
   }
 
   const direction = summary.direction === "backward" ? "Backward" : "Forward";
-  const notesText = `${summary.correct}/${summary.total} notes`;
+  const notesText = `${summary.correct}/${summary.total}`;
   const bleedText = summary.bleedDetected
-    ? `Bleeding detected${summary.bleedString ? ` on ${summary.bleedString}` : ""} (${Math.round(summary.bleedFrameRatio * 100)}% of frames).`
-    : "No string bleed detected.";
-  return `${direction}: ${summary.tempoLabel}. ${notesText} correct. ${bleedText}`;
+    ? ` · bleed${summary.bleedString ? ` ${summary.bleedString}` : ""} ${Math.round(summary.bleedFrameRatio * 100)}%`
+    : "";
+  return `${direction}: ${summary.tempoLabel.replace("Overall: ", "")} · ${notesText}${bleedText}`;
 }
 
 function renderPracticeDebug(): string {
