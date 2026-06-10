@@ -34,7 +34,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app root");
 const appRoot = app;
 
-type SequenceSubMode = "single-beat" | "phrase" | "sheet-entry";
+type SequenceSubMode = "single-beat" | "phrase";
 type BeatUnit = "half" | "quarter" | "eighth";
 type BeatStatus = "On Time" | "Short" | "Long";
 type BeatValue = "whole" | "half" | "quarter" | "eighth";
@@ -289,6 +289,7 @@ function mountUi(): void {
           <option value="live">Live Mode</option>
           <option value="practice">Practice Mode</option>
           <option value="sequence">Sequence Mode</option>
+          <option value="sheet-entry">Sheet Note Entry</option>
           <option value="spectrum">Spectrum Mode</option>
         </select>
         <button id="record-btn" disabled>Start Capture</button>
@@ -391,7 +392,6 @@ function mountUi(): void {
               <select id="sequence-submode-select">
                 <option value="single-beat">Single Beat Drill</option>
                 <option value="phrase">Phrase Capture</option>
-                <option value="sheet-entry">Sheet Note Entry</option>
               </select>
             </label>
             <label>BPM
@@ -682,12 +682,7 @@ function mountUi(): void {
 
   sequenceSubmodeSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
-    sequenceSubMode =
-      target.value === "phrase"
-        ? "phrase"
-        : target.value === "sheet-entry"
-          ? "sheet-entry"
-          : "single-beat";
+    sequenceSubMode = target.value === "phrase" ? "phrase" : "single-beat";
     state.recording = false;
     singleBeatWindow = null;
     if (singleBeatStopTimer !== null) {
@@ -954,25 +949,26 @@ function render(): void {
   const stringPurityActive = isStringPurityActive();
 
   ui.listenBtn.textContent = state.listening ? "Stop Listening" : "Start Listening";
-  ui.listenBtn.style.display = state.mode === "sequence" ? "none" : "";
+  ui.listenBtn.style.display =
+    state.mode === "sequence" || state.mode === "sheet-entry" ? "none" : "";
   ui.modeSelect.value = state.mode;
-  ui.recordBtn.disabled = state.mode !== "sequence" || sequenceSubMode === "sheet-entry";
-  ui.recordBtn.style.display =
-    state.mode === "sequence" && sequenceSubMode !== "sheet-entry" ? "" : "none";
+  ui.recordBtn.disabled = state.mode !== "sequence";
+  ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
   ui.liveMetronomeControls.style.display =
     state.mode === "live" || state.mode === "practice" ? "grid" : "none";
   ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
-  ui.noteEntryControls.style.display =
-    state.mode === "sequence" && sequenceSubMode === "sheet-entry" ? "grid" : "none";
+  ui.noteEntryControls.style.display = state.mode === "sheet-entry" ? "grid" : "none";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
       : state.mode === "practice"
         ? "Practice Output"
-      : state.mode === "live"
-        ? "Live Output"
-        : "Sequence Output";
+        : state.mode === "sheet-entry"
+          ? "Sheet Note Entry"
+          : state.mode === "live"
+            ? "Live Output"
+            : "Sequence Output";
   ui.recordBtn.textContent = captureButtonLabel();
   ui.sequenceSubmodeSelect.value = sequenceSubMode;
   ui.noteEntrySlotsInput.value = String(sheetEntrySlotCount);
@@ -1010,7 +1006,7 @@ function render(): void {
   ui.stringPurityToggle.disabled = state.mode === "spectrum";
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
-  ui.staff.classList.toggle("sheet-entry-active", state.mode === "sequence" && sequenceSubMode === "sheet-entry");
+  ui.staff.classList.toggle("sheet-entry-active", state.mode === "sheet-entry");
   syncMetronomeAnimationLoop();
 
   const centsText = state.live.cents === null ? "" : ` (${formatSigned(state.live.cents)} cents)`;
@@ -1041,7 +1037,7 @@ function render(): void {
   } else if (state.mode === "spectrum") {
     ui.captureHint.textContent =
       "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
-  } else if (sequenceSubMode === "sheet-entry") {
+  } else if (state.mode === "sheet-entry") {
     ui.captureHint.textContent =
       "Sheet Note Entry: click fixed staff slots to build a pitch sequence.";
   } else if (sequenceSubMode === "single-beat") {
@@ -1056,7 +1052,7 @@ function render(): void {
   }
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
-  const sheetEntryModeActive = state.mode === "sequence" && sequenceSubMode === "sheet-entry";
+  const sheetEntryModeActive = state.mode === "sheet-entry";
   const spectrumModeActive = state.mode === "spectrum";
   const practicePatternStaffActive = state.mode === "practice";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
@@ -1132,7 +1128,7 @@ function render(): void {
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent = "Live spectrum | log frequency scale | fixed-do reference labels";
     ui.sequenceSummary.textContent = renderSpectrumSummary(lastFrame, minBleedScore);
-  } else if (state.mode === "sequence" && sequenceSubMode === "sheet-entry") {
+  } else if (state.mode === "sheet-entry") {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent =
@@ -1175,10 +1171,6 @@ function captureButtonLabel(): string {
 
   if (sequenceSubMode === "single-beat") {
     return state.recording ? "Stop Single Beat Drill" : "Start Single Beat Drill";
-  }
-
-  if (sequenceSubMode === "sheet-entry") {
-    return "Sheet Entry";
   }
 
   return state.recording ? "Stop Phrase Capture" : "Start Phrase Capture";
@@ -1900,11 +1892,13 @@ function onModeChange(event: Event): void {
   state.mode =
     target.value === "sequence"
       ? "sequence"
-      : target.value === "spectrum"
-        ? "spectrum"
-        : target.value === "practice"
-          ? "practice"
-          : "live";
+      : target.value === "sheet-entry"
+        ? "sheet-entry"
+        : target.value === "spectrum"
+          ? "spectrum"
+          : target.value === "practice"
+            ? "practice"
+            : "live";
   resetMetronomeClock();
   pipeline?.resetTempo();
   syncStringPurityPipeline();
@@ -1939,7 +1933,6 @@ function onModeChange(event: Event): void {
 
 async function onToggleRecording(): Promise<void> {
   if (state.mode !== "sequence") return;
-  if (sequenceSubMode === "sheet-entry") return;
 
   if (!state.listening) {
     await onToggleListening();
@@ -2695,7 +2688,7 @@ function renderSheetEntrySummary(): string {
 }
 
 function handleStaffSheetEntryClick(event: MouseEvent): void {
-  if (!ui || state.mode !== "sequence" || sequenceSubMode !== "sheet-entry") {
+  if (!ui || state.mode !== "sheet-entry") {
     return;
   }
 
