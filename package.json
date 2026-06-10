@@ -1,6 +1,7 @@
 {
   "name": "violin-practice-webapp",
   "version": "0.1.0",
+  "description": "A browser-based violin practice app with live pitch detection, solfege feedback, staff visualization, and phrase capture.",
   "private": true,
   "type": "module",
   "scripts": {
