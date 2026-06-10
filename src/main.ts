@@ -225,7 +225,7 @@ let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
 const PRACTICE_BLEED_MIN = 0.01;
 const PRACTICE_BLEED_MAX = 0.95;
-const PRACTICE_BLEED_DEFAULT = 0.3;
+const PRACTICE_BLEED_DEFAULT = 0.9;
 let practiceBleedSensitivity = PRACTICE_BLEED_DEFAULT;
 let practicePeakThreshold = 50;
 let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
@@ -241,6 +241,8 @@ let practicePatternTempoRamp = createPracticePatternTempoRamp(PRACTICE_PATTERNS[
 let practiceTimingCorrectionEnabled = true;
 let practicePatternPlaying = false;
 let practicePatternStartedAtMs = 0;
+let practicePatternPassStartedAtMs = 0;
+let practicePatternPassNoteDurationMs = 0;
 let practicePatternActiveIndex: number | null = null;
 let practicePatternCycleIndex = 0;
 let practicePatternLastScrolledRow = -1;
@@ -445,7 +447,7 @@ function mountUi(): void {
                 <input id="practice-sensitivity" type="number" min="0.1" max="0.95" step="0.01" value="0.55" />
               </label>
               <label>Bleed
-                <input id="practice-bleed-sensitivity" type="number" min="0.01" max="0.95" step="0.01" value="0.30" />
+                <input id="practice-bleed-sensitivity" type="number" min="0.01" max="0.95" step="0.01" value="0.90" />
               </label>
               <label class="practice-timing-correction" for="practice-timing-correction">
                 <input id="practice-timing-correction" type="checkbox" checked />
@@ -1477,6 +1479,8 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   practicePatternLastScrolledRow = -1;
   metronomeStartMs = startMs;
   practicePatternStartedAtMs = startMs + practicePatternCountInBeats * practicePatternNoteDurationMs();
+  practicePatternPassStartedAtMs = practicePatternStartedAtMs;
+  practicePatternPassNoteDurationMs = practicePatternNoteDurationMs();
   metronomeLastTickIndex = null;
   enableVisualMetronome = true;
   pipeline?.resetTempo();
@@ -1491,6 +1495,8 @@ function stopPracticePatternPlayback(resetResults: boolean): void {
   practicePatternPlaying = false;
   practicePatternActiveIndex = null;
   practicePatternStartedAtMs = 0;
+  practicePatternPassStartedAtMs = 0;
+  practicePatternPassNoteDurationMs = 0;
   practicePatternCycleIndex = 0;
   practicePatternLastScrolledRow = -1;
   if (practicePatternStopTimer !== null) {
@@ -1515,11 +1521,12 @@ function syncPracticePatternStopTimer(pattern = selectedPracticePattern()): void
     return;
   }
 
-  const cycleDurationMs = pattern.notes.length * practicePatternNoteDurationMs();
-  const elapsedMs = performance.now() - practicePatternStartedAtMs;
+  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const cycleDurationMs = pattern.notes.length * noteDurationMs;
+  const elapsedMs = performance.now() - practicePatternPassStartedAtMs;
   const currentCycle = Math.max(0, Math.floor(Math.max(0, elapsedMs) / cycleDurationMs));
   const remainingMs =
-    practicePatternStartedAtMs + (currentCycle + 1) * cycleDurationMs - performance.now() + 140;
+    practicePatternPassStartedAtMs + (currentCycle + 1) * cycleDurationMs - performance.now() + 140;
 
   if (remainingMs <= 0) {
     markElapsedPracticePatternOrder(practicePatternTraversalOrder(pattern), pattern.notes.length, 0);
@@ -1544,46 +1551,84 @@ function practicePatternCurrentIndex(nowMs: number): number | null {
 }
 
 function practicePatternCurrentPosition(nowMs: number): PracticePatternPosition | null {
-  if (!practicePatternPlaying || practicePatternStartedAtMs <= 0) {
+  if (!practicePatternPlaying || practicePatternPassStartedAtMs <= 0) {
     return null;
   }
   const pattern = selectedPracticePattern();
   if (pattern.notes.length === 0) {
     return null;
   }
-  const elapsedMs = nowMs - practicePatternStartedAtMs;
+  if (nowMs < practicePatternPassStartedAtMs) {
+    return null;
+  }
+
+  const order = practicePatternTraversalOrder(pattern);
+  settlePracticePatternPassForNow(nowMs, order);
+
+  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const elapsedMs = nowMs - practicePatternPassStartedAtMs;
   if (elapsedMs < 0) {
     return null;
   }
-  const noteDurationMs = practicePatternNoteDurationMs();
-  const order = practicePatternTraversalOrder(pattern);
-  const cycleDurationMs = order.length * noteDurationMs;
-  const cycleIndex = Math.floor(elapsedMs / cycleDurationMs);
-  if (!practicePatternLoopEnabled && cycleIndex > practicePatternCycleIndex) {
+  const passStartStepIndex = practicePatternPassStartStepIndexForCycleKey(practicePatternCycleIndex);
+  const passEndStepIndex = practicePatternPassEndStepIndex(practicePatternCycleIndex, order.length);
+  const passLength = Math.max(0, passEndStepIndex - passStartStepIndex);
+  if (passLength === 0) {
     return null;
   }
-  const cycleElapsedMs = practicePatternLoopEnabled ? elapsedMs % cycleDurationMs : elapsedMs;
-  const stepIndex = Math.floor(cycleElapsedMs / noteDurationMs);
-  const cycleKey = practicePatternResultCycleKey(cycleIndex, stepIndex, pattern.notes.length);
-  if (practicePatternLoopEnabled && cycleKey !== practicePatternCycleIndex) {
-    finalizePracticePatternPass(practicePatternCycleIndex, order);
-    practicePatternCycleIndex = cycleKey;
-    practicePatternResults = createPracticePatternResults();
-    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+
+  const passStepOffset = Math.floor(elapsedMs / noteDurationMs);
+  if (!practicePatternLoopEnabled && passStepOffset >= passLength) {
+    return null;
   }
+
+  const stepIndex = passStartStepIndex + Math.min(passStepOffset, passLength - 1);
   const noteIndex = order[stepIndex];
   return noteIndex !== undefined
     ? {
         noteIndex,
         stepIndex,
-        passStartStepIndex: practicePatternPassStartStepIndex(stepIndex, pattern.notes.length),
-        cycleIndex,
-        cycleKey,
-        stepElapsedMs: cycleElapsedMs - stepIndex * noteDurationMs,
-        cycleElapsedMs,
+        passStartStepIndex,
+        cycleIndex: Math.floor(practicePatternCycleIndex / 2),
+        cycleKey: practicePatternCycleIndex,
+        stepElapsedMs: elapsedMs - passStepOffset * noteDurationMs,
+        cycleElapsedMs: elapsedMs,
         order,
       }
     : null;
+}
+
+function settlePracticePatternPassForNow(nowMs: number, order: number[]): void {
+  if (!practicePatternPlaying || !practicePatternLoopEnabled) {
+    return;
+  }
+
+  let guard = 0;
+  while (guard < 8) {
+    guard += 1;
+    const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+    const passStartStepIndex = practicePatternPassStartStepIndexForCycleKey(practicePatternCycleIndex);
+    const passEndStepIndex = practicePatternPassEndStepIndex(practicePatternCycleIndex, order.length);
+    const passLength = Math.max(0, passEndStepIndex - passStartStepIndex);
+    if (passLength === 0) {
+      return;
+    }
+
+    const passDurationMs = passLength * noteDurationMs;
+    if (nowMs < practicePatternPassStartedAtMs + passDurationMs) {
+      return;
+    }
+
+    markElapsedPracticePatternOrder(order, passEndStepIndex, passStartStepIndex);
+    finalizePracticePatternPass(practicePatternCycleIndex, order);
+    practicePatternCycleIndex += 1;
+    practicePatternResults = createPracticePatternResults();
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    practicePatternPassStartedAtMs += passDurationMs;
+    practicePatternPassNoteDurationMs = practicePatternNoteDurationMs();
+    metronomeStartMs = practicePatternPassStartedAtMs;
+    metronomeLastTickIndex = null;
+  }
 }
 
 function capturePracticePatternFrame(frame: PitchFrame): void {
@@ -1997,6 +2042,19 @@ function practicePatternPassStartStepIndex(stepIndex: number, noteCount: number)
     stepIndex >= noteCount
   ) {
     return noteCount;
+  }
+  return 0;
+}
+
+function practicePatternPassStartStepIndexForCycleKey(cycleKey: number): number {
+  const pattern = selectedPracticePattern();
+  if (
+    practicePatternLoopEnabled &&
+    practicePatternLoopMode === "back-and-forth" &&
+    pattern.notes.length > 2 &&
+    practicePatternPassDirection(cycleKey) === "backward"
+  ) {
+    return pattern.notes.length;
   }
   return 0;
 }
