@@ -202,6 +202,7 @@ type UiRefs = {
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
   practicePatternSelect: HTMLSelectElement;
+  practicePatternLoopToggle: HTMLInputElement;
   practicePatternName: HTMLElement;
   practicePatternPlayBtn: HTMLButtonElement;
   practicePatternReadout: HTMLSpanElement;
@@ -316,6 +317,10 @@ function mountUi(): void {
                   (pattern) => `<option value="${pattern.id}">${pattern.name}</option>`,
                 ).join("")}
               </select>
+              <label class="practice-pattern-loop" for="practice-pattern-loop">
+                <input id="practice-pattern-loop" type="checkbox" checked />
+                Loop
+              </label>
               <button id="practice-pattern-play" type="button" class="practice-pattern-play" aria-label="Start Warmup 1">▶</button>
               <div class="practice-pattern-copy">
                 <strong id="practice-pattern-name">Warmup 1</strong>
@@ -426,6 +431,7 @@ function mountUi(): void {
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
   const practicePatternSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-select");
+  const practicePatternLoopToggle = appRoot.querySelector<HTMLInputElement>("#practice-pattern-loop");
   const practicePatternName = appRoot.querySelector<HTMLElement>("#practice-pattern-name");
   const practicePatternPlayBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-play");
   const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
@@ -481,6 +487,7 @@ function mountUi(): void {
     !practiceEstimate ||
     !practiceDetail ||
     !practicePatternSelect ||
+    !practicePatternLoopToggle ||
     !practicePatternName ||
     !practicePatternPlayBtn ||
     !practicePatternReadout ||
@@ -539,6 +546,7 @@ function mountUi(): void {
     practiceEstimate,
     practiceDetail,
     practicePatternSelect,
+    practicePatternLoopToggle,
     practicePatternName,
     practicePatternPlayBtn,
     practicePatternReadout,
@@ -601,8 +609,17 @@ function mountUi(): void {
 
   practicePatternSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
-    selectedPracticePatternId = practicePatternById(target.value).id;
+    const pattern = practicePatternById(target.value);
+    selectedPracticePatternId = pattern.id;
+    practicePatternLoopEnabled = pattern.defaultLoop;
     stopPracticePatternPlayback(true);
+    scheduleRender();
+  });
+
+  practicePatternLoopToggle.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    practicePatternLoopEnabled = target.checked;
+    syncPracticePatternStopTimer();
     scheduleRender();
   });
 
