@@ -397,6 +397,10 @@ function mountUi(): void {
                 <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
               </div>
             </div>
+            <label class="metronome-sound-toggle" for="sound-metronome-toggle" aria-label="Metronome sound">
+              <input id="sound-metronome-toggle" type="checkbox" />
+              <span aria-hidden="true">🔊</span>
+            </label>
             <div id="metronome-box" class="metronome-box"></div>
           </div>
         </section>
@@ -549,10 +553,6 @@ function mountUi(): void {
           <label class="toggle-row compact practice-hidden-control" for="visual-metronome-toggle">
             <input id="visual-metronome-toggle" type="checkbox" />
             Visual metronome
-          </label>
-          <label class="toggle-row compact practice-hidden-control" for="sound-metronome-toggle">
-            <input id="sound-metronome-toggle" type="checkbox" />
-            Metronome sound
           </label>
           <div id="beat-batch-box" class="beat-batch-box"></div>
           <p id="live-meta-line" class="meta-line">- | 0% | cents: - | Not listening</p>

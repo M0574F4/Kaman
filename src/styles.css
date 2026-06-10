@@ -206,6 +206,26 @@ button.primary {
   flex: 0 0 auto;
 }
 
+.metronome-sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  gap: 0.25rem;
+  padding: 0.35rem 0.45rem;
+  border: 1px solid #ddd1be;
+  border-radius: 8px;
+  background: #fffdf8;
+  color: #1f2f2a;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.metronome-sound-toggle input {
+  margin: 0;
+}
+
 .beat-batch-box {
   margin: 0.1rem 0 0.6rem;
   min-height: 72px;
@@ -1412,6 +1432,10 @@ pre {
 
 #app:not([data-mode="practice"]) .practice-sheet-statusbar .practice-feedback-grid,
 #app:not([data-mode="practice"]) #practice-estimate {
+  display: none;
+}
+
+#app[data-mode="spectrum"] .metronome-sound-toggle {
   display: none;
 }
 
