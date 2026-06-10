@@ -216,7 +216,10 @@ let enableVisualMetronome = true;
 let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
-let practiceBleedSensitivity = 0.3;
+const PRACTICE_BLEED_MIN = 0.01;
+const PRACTICE_BLEED_MAX = 0.95;
+const PRACTICE_BLEED_DEFAULT = 0.3;
+let practiceBleedSensitivity = PRACTICE_BLEED_DEFAULT;
 let practicePeakThreshold = 50;
 let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
 let practicePeakMergeTouched = false;
@@ -395,7 +398,7 @@ function mountUi(): void {
                 <div id="practice-status" class="practice-status status-idle">-</div>
               </div>
               <div class="practice-feedback-card overall">
-                <span>Round</span>
+                <span>Pass</span>
                 <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
               </div>
             </div>
@@ -427,7 +430,7 @@ function mountUi(): void {
                 <input id="practice-sensitivity" type="number" min="0.1" max="0.95" step="0.01" value="0.55" />
               </label>
               <label>Bleed
-                <input id="practice-bleed-sensitivity" type="number" min="0.05" max="0.49" step="0.01" value="0.30" />
+                <input id="practice-bleed-sensitivity" type="number" min="0.01" max="0.95" step="0.01" value="0.30" />
               </label>
               <label>Correction
                 <select id="practice-correction-source">
@@ -961,6 +964,7 @@ function mountUi(): void {
       return;
     }
     liveSettings.confidenceThreshold = clamp(parsed, 0.1, 0.95);
+    syncPracticeSensitivityPipeline();
     scheduleRender();
   });
 
@@ -971,6 +975,7 @@ function mountUi(): void {
       ? clamp(parsed, 0.1, 0.95)
       : initialLiveSettings().confidenceThreshold;
     target.value = liveSettings.confidenceThreshold.toFixed(2);
+    syncPracticeSensitivityPipeline();
     liveTracker.reset();
     scheduleRender();
   });
@@ -981,16 +986,15 @@ function mountUi(): void {
     if (!Number.isFinite(parsed)) {
       return;
     }
-    practiceBleedSensitivity = clamp(parsed, 0.05, 0.49);
-    scheduleRender();
+    practiceBleedSensitivity = clamp(parsed, PRACTICE_BLEED_MIN, PRACTICE_BLEED_MAX);
   });
 
   practiceBleedSensitivityInput.addEventListener("change", (event) => {
     const target = event.target as HTMLInputElement;
     const parsed = Number.parseFloat(target.value);
     practiceBleedSensitivity = Number.isFinite(parsed)
-      ? clamp(parsed, 0.05, 0.49)
-      : 0.3;
+      ? clamp(parsed, PRACTICE_BLEED_MIN, PRACTICE_BLEED_MAX)
+      : PRACTICE_BLEED_DEFAULT;
     target.value = practiceBleedSensitivity.toFixed(2);
     scheduleRender();
   });
@@ -1915,29 +1919,26 @@ function practicePatternOverallFeedbackText(): string {
   const summary = practicePatternPassSummary;
   if (!summary) {
     return practicePatternPlaying
-      ? "Finish round"
+      ? "Finish pass"
       : "After first pass";
   }
 
-  const messages: string[] = [];
   if (summary.bleedDetected && summary.bleedFrameRatio >= 0.12) {
-    messages.push("Avoid extra string");
+    return "One string only";
   }
   if (summary.wrong > 0) {
-    messages.push("Check notes");
+    return "Check notes";
   }
-  const tempoText =
-    summary.tempoStatus === "play-faster"
-      ? "Play faster"
-      : summary.tempoStatus === "play-slower"
-        ? "Play slower"
-        : summary.tempoStatus === "on-tempo"
-          ? "On tempo"
-          : "";
-  if (tempoText) {
-    messages.push(tempoText);
+  if (summary.tempoStatus === "play-faster") {
+    return "Play faster";
   }
-  return messages.slice(0, 2).join(" · ") || "Good round";
+  if (summary.tempoStatus === "play-slower") {
+    return "Play slower";
+  }
+  if (summary.tempoStatus === "on-tempo") {
+    return "On tempo";
+  }
+  return "Good round";
 }
 
 function renderPracticeDebug(): string {
@@ -2086,6 +2087,21 @@ function syncPracticeTolerancePipeline(): void {
 
 function syncPracticeCorrectionSourcePipeline(): void {
   pipeline?.setPracticeCorrectionSource(practiceCorrectionSource);
+}
+
+function syncPracticeSensitivityPipeline(): void {
+  pipeline?.setPitchRmsThreshold(sensitivityToRmsThreshold(liveSettings.confidenceThreshold));
+}
+
+function activeBleedThreshold(): number {
+  return state.mode === "practice" ? practiceBleedSensitivity : minBleedScore;
+}
+
+function sensitivityToRmsThreshold(sensitivity: number): number {
+  const normalized = (clamp(sensitivity, 0.1, 0.95) - 0.1) / 0.85;
+  const minRms = 0.004;
+  const maxRms = 0.06;
+  return minRms * (maxRms / minRms) ** normalized;
 }
 
 function asPracticePatternLoopMode(value: string): PracticePatternLoopMode {
@@ -2412,6 +2428,7 @@ async function onToggleListening(): Promise<void> {
       sequenceSettings.bpm,
     );
     syncStringPurityPipeline();
+    syncPracticeSensitivityPipeline();
     syncPracticePeakPickingPipeline();
     syncPracticeTolerancePipeline();
     syncPracticeCorrectionSourcePipeline();
@@ -3818,11 +3835,12 @@ function formatStringPurityLine(frame: PitchFrame | null): string {
   const purityPct = Math.round(frame.stringPurity * 100);
   const bleedRatio = frame.adjacentBleedRatio ?? 0;
   const bleedPct = `${Math.round(bleedRatio * 100)}%`;
-  const bleedDetected = bleedRatio >= minBleedScore;
+  const bleedThreshold = activeBleedThreshold();
+  const bleedDetected = bleedRatio >= bleedThreshold;
   const severity =
     !bleedDetected
       ? "Clean"
-      : bleedRatio >= Math.min(0.34, minBleedScore + 0.18)
+      : bleedRatio >= Math.min(PRACTICE_BLEED_MAX, bleedThreshold + 0.18)
         ? "High bleed"
         : "Possible bleed";
   const bleedText =
@@ -3834,7 +3852,7 @@ function buildBleedNoteLine(frame: PitchFrame | null): string {
   if (!frame || frame.bleedString === null || frame.adjacentBleedRatio === null) {
     return "&nbsp;";
   }
-  if (frame.adjacentBleedRatio < minBleedScore) {
+  if (frame.adjacentBleedRatio < activeBleedThreshold()) {
     return "&nbsp;";
   }
   const bleedLabel = bleedStringToSolfege(frame.bleedString);
@@ -3853,8 +3871,11 @@ function bleedStringToSolfege(stringName: "G" | "D" | "A" | "E"): string {
 function bleedOverlayIntensity(bleedRatio: number): number {
   // Map bleed intensity to [0..1] where 1 is the strongest bleed that is still
   // plausibly "secondary", before it would become the dominant/main tone.
-  const minBleed = minBleedScore;
-  const maxSecondaryBleed = 0.49;
+  const minBleed = activeBleedThreshold();
+  const maxSecondaryBleed = Math.min(PRACTICE_BLEED_MAX, minBleed + 0.24);
+  if (maxSecondaryBleed <= minBleed) {
+    return bleedRatio >= minBleed ? 1 : 0;
+  }
   return clamp((bleedRatio - minBleed) / (maxSecondaryBleed - minBleed), 0, 1);
 }
 

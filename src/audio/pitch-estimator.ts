@@ -33,6 +33,10 @@ export class AutoCorrelationPitchEstimator implements PitchEstimator {
     this.stringPurityEnabled = enabled;
   }
 
+  setRmsThreshold(rmsThreshold: number): void {
+    this.opts.rmsThreshold = Math.max(0, rmsThreshold);
+  }
+
   process(input: Float32Array, tMs: number): PitchFrame {
     const rms = rootMeanSquare(input);
     if (rms < this.opts.rmsThreshold) {

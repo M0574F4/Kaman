@@ -230,10 +230,12 @@ button.primary {
 .metronome-sound-toggle:not(.is-on)::after {
   content: "×";
   position: absolute;
-  right: 0.34rem;
-  top: 0.18rem;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: #b42318;
-  font-size: 1.08rem;
+  font-size: 1.2rem;
   font-weight: 800;
   line-height: 1;
   text-shadow: 0 1px 0 #fffdf8;

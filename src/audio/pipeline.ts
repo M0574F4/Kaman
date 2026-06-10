@@ -10,6 +10,7 @@ export type PipelineHandle = {
   setPracticePeakPicking: (peakThreshold: number, peakMergeMs: number) => void;
   setPracticeTolerancePct: (tolerancePct: number) => void;
   setPracticeCorrectionSource: (source: TempoResponsivenessLabel) => void;
+  setPitchRmsThreshold: (rmsThreshold: number) => void;
   resetTempo: () => void;
 };
 
@@ -77,6 +78,9 @@ export function startPitchPipeline(
     },
     setPracticeCorrectionSource: (source: TempoResponsivenessLabel) => {
       tempoEstimator.setCorrectionEstimateLabel(source);
+    },
+    setPitchRmsThreshold: (rmsThreshold: number) => {
+      estimator.setRmsThreshold(rmsThreshold);
     },
     resetTempo: () => {
       tempoEstimator.reset();
