@@ -38,7 +38,7 @@ export function initialLiveSettings(): LiveSettings {
     a4Hz: 440,
     minMidi: 55,
     maxMidi: 100,
-    confidenceThreshold: 0.42,
+    confidenceThreshold: 0.55,
   };
 }
 

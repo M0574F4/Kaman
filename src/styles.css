@@ -590,7 +590,7 @@ button.primary {
 
 .practice-minimal-controls input[type="number"],
 .practice-minimal-controls select {
-  width: 4.8rem;
+  width: 4.2rem;
   min-width: 0;
   border: 1px solid #d2c4af;
   border-radius: 8px;
@@ -599,7 +599,7 @@ button.primary {
 }
 
 .practice-minimal-controls select {
-  width: 7rem;
+  width: 6.6rem;
 }
 
 .practice-debug-toggle {

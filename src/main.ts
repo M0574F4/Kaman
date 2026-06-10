@@ -111,6 +111,7 @@ type PracticePattern = {
 type PracticePatternResult = {
   status: "pending" | "correct" | "wrong";
   playedMidi: number | null;
+  bleedMidi: number | null;
 };
 
 type PracticePatternPassDirection = "forward" | "backward";
@@ -294,6 +295,7 @@ type UiRefs = {
   practicePatternPlayBtn: HTMLButtonElement;
   practicePatternReadout: HTMLSpanElement;
   practiceToleranceInput: HTMLInputElement;
+  practiceSensitivityInput: HTMLInputElement;
   practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
   practiceDebugSection: HTMLDivElement;
@@ -415,6 +417,9 @@ function mountUi(): void {
             <div class="practice-minimal-controls">
               <label>Tol
                 <input id="practice-tolerance" type="number" min="1" max="30" step="1" value="8" />
+              </label>
+              <label>Sens
+                <input id="practice-sensitivity" type="number" min="0.1" max="0.95" step="0.01" value="0.55" />
               </label>
               <label>Correction
                 <select id="practice-correction-source">
@@ -576,6 +581,7 @@ function mountUi(): void {
   const practicePatternPlayBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-play");
   const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
   const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
+  const practiceSensitivityInput = appRoot.querySelector<HTMLInputElement>("#practice-sensitivity");
   const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
   const practiceDebugSection = appRoot.querySelector<HTMLDivElement>("#practice-debug-section");
@@ -640,6 +646,7 @@ function mountUi(): void {
     !practicePatternPlayBtn ||
     !practicePatternReadout ||
     !practiceToleranceInput ||
+    !practiceSensitivityInput ||
     !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
     !practiceDebugSection ||
@@ -707,6 +714,7 @@ function mountUi(): void {
     practicePatternPlayBtn,
     practicePatternReadout,
     practiceToleranceInput,
+    practiceSensitivityInput,
     practiceCorrectionSourceSelect,
     practiceDebugToggle,
     practiceDebugSection,
@@ -939,6 +947,27 @@ function mountUi(): void {
     scheduleRender();
   });
 
+  practiceSensitivityInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = Number.parseFloat(target.value);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    liveSettings.confidenceThreshold = clamp(parsed, 0.1, 0.95);
+    scheduleRender();
+  });
+
+  practiceSensitivityInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = Number.parseFloat(target.value);
+    liveSettings.confidenceThreshold = Number.isFinite(parsed)
+      ? clamp(parsed, 0.1, 0.95)
+      : initialLiveSettings().confidenceThreshold;
+    target.value = liveSettings.confidenceThreshold.toFixed(2);
+    liveTracker.reset();
+    scheduleRender();
+  });
+
   practiceCorrectionSourceSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     practiceCorrectionSource = asPracticeCorrectionSource(target.value);
@@ -1120,6 +1149,9 @@ function render(): void {
   }
   if (activeElement !== ui.practiceToleranceInput) {
     ui.practiceToleranceInput.value = String(practiceTolerancePct);
+  }
+  if (activeElement !== ui.practiceSensitivityInput) {
+    ui.practiceSensitivityInput.value = liveSettings.confidenceThreshold.toFixed(2);
   }
   ui.practiceCorrectionSourceSelect.value = practiceCorrectionSource;
   ui.practiceDebugToggle.checked = showPracticeDebug;
@@ -1464,6 +1496,17 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   markElapsedPracticePatternSteps(position);
   capturePracticePatternBleedFrame(frame);
 
+  const result = practicePatternResults[position.noteIndex];
+  const target = selectedPracticePattern().notes[position.noteIndex];
+  if (!result || !target) {
+    return;
+  }
+
+  const bleedMidi = practiceBleedMidi(frame);
+  if (bleedMidi !== null) {
+    result.bleedMidi = bleedMidi;
+  }
+
   const noteDurationMs = practicePatternNoteDurationMs();
   if (position.stepElapsedMs < noteDurationMs * 0.18) {
     return;
@@ -1475,17 +1518,9 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
     return;
   }
 
-  const result = practicePatternResults[position.noteIndex];
-  const target = selectedPracticePattern().notes[position.noteIndex];
-  if (!result || !target) {
-    return;
-  }
-
   const isCorrect = playedMidi === target.midi;
   if (result.status === "pending") {
     result.status = isCorrect ? "correct" : "wrong";
-    result.playedMidi = playedMidi;
-  } else if (result.status === "wrong") {
     result.playedMidi = playedMidi;
   }
 }
@@ -1633,6 +1668,21 @@ function capturePracticePatternBleedFrame(frame: PitchFrame): void {
       (practicePatternPassAccumulator.bleedStringCounts.get(frame.bleedString) ?? 0) + 1,
     );
   }
+}
+
+function practiceBleedMidi(frame: PitchFrame): number | null {
+  const bleedRatio = frame.adjacentBleedRatio ?? 0;
+  if (bleedRatio < minBleedScore || !frame.bleedString) {
+    return null;
+  }
+  return openStringMidi(frame.bleedString);
+}
+
+function openStringMidi(stringName: "G" | "D" | "A" | "E"): number {
+  if (stringName === "G") return 55;
+  if (stringName === "D") return 62;
+  if (stringName === "A") return 69;
+  return 76;
 }
 
 function capturePracticePatternTempoFrame(frame: TempoFrame): void {
@@ -3026,14 +3076,15 @@ function renderStaffPracticePattern(nowMs: number): string {
       const stemDirection = stemDirectionForMidi(note.midi);
       const statusClass = `status-${result.status}`;
       const activeClass = activeIndex === index ? "active active-slot" : "";
+      const overlayMidi = result.status === "wrong" ? result.playedMidi : result.bleedMidi;
       const playedNoteHtml =
-        result.status === "wrong" && result.playedMidi !== null
-          ? renderPracticePlayedNote(result.playedMidi)
+        overlayMidi !== null
+          ? renderPracticePlayedNote(overlayMidi)
           : "";
       const playedLabel =
-        result.playedMidi === null
+        overlayMidi === null
           ? "&nbsp;"
-          : `${midiToSolfege(result.playedMidi)} ${midiToScientific(result.playedMidi)}`;
+          : `${midiToSolfege(overlayMidi)} ${midiToScientific(overlayMidi)}`;
 
       return `
         <div class="practice-pattern-slot ${activeClass}" data-row-index="${rowIndex}">
@@ -3686,6 +3737,7 @@ function createPracticePatternResults(): PracticePatternResult[] {
   return selectedPracticePattern().notes.map(() => ({
     status: "pending",
     playedMidi: null,
+    bleedMidi: null,
   }));
 }
 
