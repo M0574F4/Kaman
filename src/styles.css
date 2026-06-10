@@ -307,7 +307,7 @@ button.primary {
 
 .note-entry-controls {
   display: none;
-  grid-template-columns: minmax(5.8rem, 0.7fr) minmax(8rem, 1fr) auto;
+  grid-template-columns: repeat(auto-fit, minmax(6.8rem, 1fr));
   gap: 0.5rem;
   align-items: end;
   margin: -0.1rem 0 0.6rem;

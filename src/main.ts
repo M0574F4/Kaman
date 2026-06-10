@@ -40,6 +40,7 @@ type BeatStatus = "On Time" | "Short" | "Long";
 type BeatValue = "whole" | "half" | "quarter" | "eighth";
 type SheetEntryAccidental = "natural" | "sharp" | "flat";
 type SheetEntryTool = SheetEntryAccidental | "rest";
+type SheetEntrySlotValue = "quarter" | "eighth" | "sixteenth";
 
 type BeatSymbol = {
   kind: "note" | "rest";
@@ -180,7 +181,10 @@ let practicePatternResults: PracticePatternResult[] = createPracticePatternResul
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let sheetEntryTool: SheetEntryTool = "natural";
-let sheetEntrySlotCount = defaultSheetSlotCount(sequenceSettings.timeSignature);
+let sheetEntryTimeSignature: typeof sequenceSettings.timeSignature = "4/4";
+let sheetEntrySlotValue: SheetEntrySlotValue = "eighth";
+let sheetEntryBars = 1;
+let sheetEntrySlotCount = defaultSheetSlotCount(sheetEntryTimeSignature, sheetEntrySlotValue, sheetEntryBars);
 let sheetEntrySlots: Array<SheetEntrySlot | null> = createEmptySheetSlots(sheetEntrySlotCount);
 let beatToleranceMs = 80;
 let beatAttemptId = 1;
@@ -242,7 +246,9 @@ type UiRefs = {
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
   noteEntryControls: HTMLDivElement;
-  noteEntrySlotsInput: HTMLInputElement;
+  noteEntryTimeSignatureSelect: HTMLSelectElement;
+  noteEntrySlotValueSelect: HTMLSelectElement;
+  noteEntryBarsInput: HTMLInputElement;
   noteEntryToolSelect: HTMLSelectElement;
   noteEntryClearBtn: HTMLButtonElement;
   liveBpmInput: HTMLInputElement;
@@ -418,8 +424,24 @@ function mountUi(): void {
             </label>
           </div>
           <div id="note-entry-controls" class="note-entry-controls">
-            <label>Slots
-              <input id="note-entry-slots" type="number" min="1" max="32" step="1" value="8" />
+            <label>Time
+              <select id="note-entry-time-signature">
+                <option value="2/2">2/2</option>
+                <option value="2/4">2/4</option>
+                <option value="3/4">3/4</option>
+                <option value="4/4" selected>4/4</option>
+                <option value="6/8">6/8</option>
+              </select>
+            </label>
+            <label>Slot
+              <select id="note-entry-slot-value">
+                <option value="quarter">Quarter</option>
+                <option value="eighth" selected>Eighth</option>
+                <option value="sixteenth">Sixteenth</option>
+              </select>
+            </label>
+            <label>Bars
+              <input id="note-entry-bars" type="number" min="1" max="4" step="1" value="1" />
             </label>
             <label>Click tool
               <select id="note-entry-tool">
@@ -490,7 +512,9 @@ function mountUi(): void {
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
   const noteEntryControls = appRoot.querySelector<HTMLDivElement>("#note-entry-controls");
-  const noteEntrySlotsInput = appRoot.querySelector<HTMLInputElement>("#note-entry-slots");
+  const noteEntryTimeSignatureSelect = appRoot.querySelector<HTMLSelectElement>("#note-entry-time-signature");
+  const noteEntrySlotValueSelect = appRoot.querySelector<HTMLSelectElement>("#note-entry-slot-value");
+  const noteEntryBarsInput = appRoot.querySelector<HTMLInputElement>("#note-entry-bars");
   const noteEntryToolSelect = appRoot.querySelector<HTMLSelectElement>("#note-entry-tool");
   const noteEntryClearBtn = appRoot.querySelector<HTMLButtonElement>("#note-entry-clear");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
@@ -550,7 +574,9 @@ function mountUi(): void {
     !sequenceControls ||
     !sequenceSubmodeSelect ||
     !noteEntryControls ||
-    !noteEntrySlotsInput ||
+    !noteEntryTimeSignatureSelect ||
+    !noteEntrySlotValueSelect ||
+    !noteEntryBarsInput ||
     !noteEntryToolSelect ||
     !noteEntryClearBtn ||
     !liveBpmInput ||
@@ -613,7 +639,9 @@ function mountUi(): void {
     sequenceControls,
     sequenceSubmodeSelect,
     noteEntryControls,
-    noteEntrySlotsInput,
+    noteEntryTimeSignatureSelect,
+    noteEntrySlotValueSelect,
+    noteEntryBarsInput,
     noteEntryToolSelect,
     noteEntryClearBtn,
     liveBpmInput,
@@ -701,11 +729,25 @@ function mountUi(): void {
     scheduleRender();
   });
 
-  noteEntrySlotsInput.addEventListener("change", (event) => {
+  noteEntryTimeSignatureSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    sheetEntryTimeSignature = asTimeSignature(target.value);
+    syncSheetEntryTiming();
+    scheduleRender();
+  });
+
+  noteEntrySlotValueSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    sheetEntrySlotValue = asSheetEntrySlotValue(target.value);
+    syncSheetEntryTiming();
+    scheduleRender();
+  });
+
+  noteEntryBarsInput.addEventListener("change", (event) => {
     const target = event.target as HTMLInputElement;
-    sheetEntrySlotCount = clamp(parseInt(target.value || "8", 10), 1, 32);
-    target.value = String(sheetEntrySlotCount);
-    resizeSheetEntrySlots(sheetEntrySlotCount);
+    sheetEntryBars = clamp(parseInt(target.value || "1", 10), 1, 4);
+    target.value = String(sheetEntryBars);
+    syncSheetEntryTiming();
     scheduleRender();
   });
 
@@ -971,9 +1013,13 @@ function render(): void {
             : "Sequence Output";
   ui.recordBtn.textContent = captureButtonLabel();
   ui.sequenceSubmodeSelect.value = sequenceSubMode;
-  ui.noteEntrySlotsInput.value = String(sheetEntrySlotCount);
-  ui.noteEntryToolSelect.value = sheetEntryTool;
   const activeElement = document.activeElement;
+  ui.noteEntryTimeSignatureSelect.value = sheetEntryTimeSignature;
+  ui.noteEntrySlotValueSelect.value = sheetEntrySlotValue;
+  if (activeElement !== ui.noteEntryBarsInput) {
+    ui.noteEntryBarsInput.value = String(sheetEntryBars);
+  }
+  ui.noteEntryToolSelect.value = sheetEntryTool;
   if (activeElement !== ui.liveBpmInput) {
     ui.liveBpmInput.value = String(sequenceSettings.bpm);
   }
@@ -1132,7 +1178,7 @@ function render(): void {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent =
-      `Sheet entry | ${sheetEntrySlotCount} fixed slots | ${sequenceSettings.timeSignature} | ASCII pitch names`;
+      `Sheet entry | ${sheetEntryBars} bar${sheetEntryBars === 1 ? "" : "s"} | ${sheetEntryTimeSignature} | ${sheetEntrySlotCount} ${sheetEntrySlotValue}-note slots | ASCII pitch names`;
     ui.sequenceSummary.textContent = renderSheetEntrySummary();
   } else if (state.mode === "sequence" && sequenceSubMode === "single-beat") {
     const targetMs = barDurationMs(sequenceSettings.bpm, sequenceSettings.timeSignature);
@@ -2676,6 +2722,8 @@ function renderSheetEntrySummary(): string {
     .join("\n");
 
   return [
+    `Timing: ${sheetEntryBars} bar${sheetEntryBars === 1 ? "" : "s"} of ${sheetEntryTimeSignature}, ${sheetEntrySlotValue}-note slots`,
+    "",
     "Fixed-slot sequence:",
     slotNames.join(" "),
     "",
@@ -2717,7 +2765,7 @@ function handleStaffSheetEntryClick(event: MouseEvent): void {
 }
 
 function resizeSheetEntrySlots(nextCount: number): void {
-  const normalizedCount = clamp(Math.round(nextCount), 1, 32);
+  const normalizedCount = clamp(Math.round(nextCount), 1, 64);
   if (sheetEntrySlots.length === normalizedCount) {
     return;
   }
@@ -2730,11 +2778,43 @@ function resizeSheetEntrySlots(nextCount: number): void {
 }
 
 function createEmptySheetSlots(count: number): Array<SheetEntrySlot | null> {
-  return Array.from({ length: clamp(Math.round(count), 1, 32) }, () => null);
+  return Array.from({ length: clamp(Math.round(count), 1, 64) }, () => null);
 }
 
-function defaultSheetSlotCount(timeSignature: typeof sequenceSettings.timeSignature): number {
-  return beatsPerBar(timeSignature) * slotsPerBeatForTimeSignature(timeSignature);
+function defaultSheetSlotCount(
+  timeSignature: typeof sequenceSettings.timeSignature,
+  slotValue: SheetEntrySlotValue,
+  bars: number,
+): number {
+  return clamp(sheetEntrySlotsPerBar(timeSignature, slotValue) * bars, 1, 64);
+}
+
+function syncSheetEntryTiming(): void {
+  sheetEntrySlotCount = defaultSheetSlotCount(
+    sheetEntryTimeSignature,
+    sheetEntrySlotValue,
+    sheetEntryBars,
+  );
+  resizeSheetEntrySlots(sheetEntrySlotCount);
+}
+
+function sheetEntrySlotsPerBar(
+  timeSignature: typeof sequenceSettings.timeSignature,
+  slotValue: SheetEntrySlotValue,
+): number {
+  const [numeratorText, denominatorText] = timeSignature.split("/");
+  const numerator = parseInt(numeratorText ?? "4", 10);
+  const denominator = parseInt(denominatorText ?? "4", 10);
+  const beats = Number.isFinite(numerator) && numerator > 0 ? numerator : 4;
+  const beatWeight = 16 / (Number.isFinite(denominator) && denominator > 0 ? denominator : 4);
+  const barWeight = beats * beatWeight;
+  return Math.max(1, Math.round(barWeight / sheetEntrySlotWeight(slotValue)));
+}
+
+function sheetEntrySlotWeight(slotValue: SheetEntrySlotValue): number {
+  if (slotValue === "quarter") return 4;
+  if (slotValue === "sixteenth") return 1;
+  return 2;
 }
 
 function asSheetEntryTool(value: string): SheetEntryTool {
@@ -2742,6 +2822,13 @@ function asSheetEntryTool(value: string): SheetEntryTool {
     return value;
   }
   return "natural";
+}
+
+function asSheetEntrySlotValue(value: string): SheetEntrySlotValue {
+  if (value === "quarter" || value === "sixteenth") {
+    return value;
+  }
+  return "eighth";
 }
 
 function accidentalOffset(accidental: SheetEntryAccidental): number {
