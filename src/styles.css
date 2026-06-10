@@ -276,8 +276,8 @@ button.primary {
 }
 
 .metro-beat {
-  width: 16px;
-  height: 16px;
+  width: 32px;
+  height: 32px;
   border-radius: 999px;
   background: #c0b09c;
   opacity: 0.45;
@@ -404,7 +404,7 @@ button.primary {
   min-height: 1.9rem;
   padding: 0.22rem 0.5rem;
   border-radius: 8px;
-  font-size: 1.02rem;
+  font-size: 1.12rem;
   font-weight: 700;
   color: #1f2f2a;
   background: #e9f4ee;
@@ -443,7 +443,7 @@ button.primary {
   border-radius: 8px;
   color: #1f2f2a;
   background: #f3f5f2;
-  font-size: 0.86rem;
+  font-size: 1.12rem;
   line-height: 1.25;
 }
 
@@ -577,7 +577,7 @@ button.primary {
   flex-wrap: wrap;
   gap: 0.42rem;
   align-items: center;
-  margin-top: 0.44rem;
+  margin: 0;
 }
 
 .practice-minimal-controls label {
@@ -821,8 +821,8 @@ button.primary {
 }
 
 .staff.practice-sheet-active {
-  height: min(54dvh, 460px);
-  min-height: 280px;
+  height: min(56dvh, 500px);
+  min-height: 300px;
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
@@ -1004,7 +1004,7 @@ button.primary {
 
 .practice-sheet-row {
   position: relative;
-  min-height: 260px;
+  min-height: 292px;
   border: 1px solid rgba(120, 101, 75, 0.16);
   border-radius: 8px;
   background: #fffef9;
@@ -1157,7 +1157,7 @@ button.primary {
 }
 
 .practice-pattern-target {
-  bottom: 16px;
+  bottom: 22px;
   color: #1f2f2a;
   font-size: 0.7rem;
   font-weight: 700;
@@ -1165,7 +1165,7 @@ button.primary {
 }
 
 .practice-pattern-played {
-  bottom: 2px;
+  bottom: 8px;
   padding: 0 1px;
   color: #9a9184;
   font-size: 0.54rem;
@@ -1420,6 +1420,7 @@ pre {
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 0.45rem;
+  grid-template-columns: none;
 }
 
 #app[data-mode="practice"] .live-metro-controls label {
@@ -1429,6 +1430,10 @@ pre {
 #app[data-mode="practice"] #practice-estimate {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+#app[data-mode="practice"] .live-metro-controls .practice-minimal-controls {
+  flex: 0 0 auto;
 }
 
 @media (max-width: 720px) {

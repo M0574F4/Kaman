@@ -29,8 +29,8 @@ type StableNote = {
   lastMs: number;
 };
 
-const MIN_ONSET_STABLE_MS = 90;
-const MIN_CHANGE_STABLE_MS = 110;
+const MIN_ONSET_STABLE_MS = 150;
+const MIN_CHANGE_STABLE_MS = 150;
 const PITCH_DEADBAND_CENTS = 35;
 
 export function initialLiveSettings(): LiveSettings {
@@ -38,7 +38,7 @@ export function initialLiveSettings(): LiveSettings {
     a4Hz: 440,
     minMidi: 55,
     maxMidi: 100,
-    confidenceThreshold: 0.3,
+    confidenceThreshold: 0.42,
   };
 }
 

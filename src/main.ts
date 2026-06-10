@@ -100,6 +100,11 @@ type PracticePattern = {
   defaultLoop: boolean;
   defaultLoopMode: PracticePatternLoopMode;
   defaultCountInBeats: number;
+  tempoRamp?: {
+    initialBpm: number;
+    stepBpm: number;
+    maxBpm: number;
+  };
   notes: PracticePatternNote[];
 };
 
@@ -153,6 +158,11 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
     defaultLoop: true,
     defaultLoopMode: "back-and-forth",
     defaultCountInBeats: 4,
+    tempoRamp: {
+      initialBpm: 80,
+      stepBpm: 5,
+      maxBpm: 120,
+    },
     notes: [
       ...makeWarmupGroup(74, "Re"),
       ...makeWarmupGroup(69, "La"),
@@ -166,6 +176,11 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
     defaultLoop: true,
     defaultLoopMode: "back-and-forth",
     defaultCountInBeats: 4,
+    tempoRamp: {
+      initialBpm: 80,
+      stepBpm: 5,
+      maxBpm: 120,
+    },
     notes: [
       ...makeWarmupGroup(74, "Re", 2),
       ...makeWarmupGroup(69, "La", 2),
@@ -397,6 +412,22 @@ function mountUi(): void {
               </span>
             </label>
             <p id="practice-estimate" class="practice-estimate">80 target · -</p>
+            <div class="practice-minimal-controls">
+              <label>Tol
+                <input id="practice-tolerance" type="number" min="1" max="30" step="1" value="8" />
+              </label>
+              <label>Correction
+                <select id="practice-correction-source">
+                  <option value="Fast">Fast</option>
+                  <option value="Balanced" selected>Balanced</option>
+                  <option value="Stable">Stable</option>
+                </select>
+              </label>
+              <label class="practice-debug-toggle" for="practice-debug-toggle">
+                <input id="practice-debug-toggle" type="checkbox" />
+                Diagnostics
+              </label>
+            </div>
           </div>
           <div id="practice-panel" class="practice-panel">
             <div class="practice-pattern-controls">
@@ -422,22 +453,6 @@ function mountUi(): void {
               </div>
             </div>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
-            <div class="practice-minimal-controls">
-              <label>Tolerance %
-                <input id="practice-tolerance" type="number" min="1" max="30" step="1" value="8" />
-              </label>
-              <label>Correction
-                <select id="practice-correction-source">
-                  <option value="Fast">Fast</option>
-                  <option value="Balanced" selected>Balanced</option>
-                  <option value="Stable">Stable</option>
-                </select>
-              </label>
-              <label class="practice-debug-toggle" for="practice-debug-toggle">
-                <input id="practice-debug-toggle" type="checkbox" />
-                Show tempo diagnostics
-              </label>
-            </div>
             <div id="practice-debug-section" class="practice-debug-section">
               <div class="practice-tuning">
                 <label>Peak threshold <span id="practice-peak-threshold-value">50</span>
@@ -1316,6 +1331,7 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   }
 
   const pattern = selectedPracticePattern();
+  applyPracticePatternInitialTempo(pattern);
   const startMs = performance.now();
 
   practicePatternResults = createPracticePatternResults();
@@ -1466,7 +1482,7 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   }
 
   const isCorrect = playedMidi === target.midi;
-  if (isCorrect || result.status === "pending") {
+  if (result.status === "pending") {
     result.status = isCorrect ? "correct" : "wrong";
     result.playedMidi = playedMidi;
   } else if (result.status === "wrong") {
@@ -1542,6 +1558,46 @@ function finalizePracticePatternPass(cycleKey: number, order: number[]): void {
       Math.max(1, practicePatternPassAccumulator.frameCount),
     bleedString,
   };
+  advancePracticePatternTempo(pattern);
+}
+
+function applyPracticePatternInitialTempo(pattern: PracticePattern): void {
+  if (!pattern.tempoRamp) {
+    return;
+  }
+  setPracticeBpm(pattern.tempoRamp.initialBpm, true);
+}
+
+function advancePracticePatternTempo(pattern: PracticePattern): void {
+  const ramp = pattern.tempoRamp;
+  if (!ramp || ramp.stepBpm <= 0) {
+    return;
+  }
+  const nextBpm = Math.min(ramp.maxBpm, sequenceSettings.bpm + ramp.stepBpm);
+  if (nextBpm === sequenceSettings.bpm) {
+    return;
+  }
+  setPracticeBpm(nextBpm, false);
+}
+
+function setPracticeBpm(nextBpm: number, resetTempo: boolean): void {
+  const bpm = clamp(Math.round(nextBpm), 30, 240);
+  if (bpm === sequenceSettings.bpm) {
+    return;
+  }
+  sequenceSettings.bpm = bpm;
+  state.practice.targetBpm = bpm;
+  if (!practicePeakMergeTouched) {
+    practicePeakMergeMs = defaultPracticePeakMergeMs(bpm);
+  }
+  pipeline?.setPracticeTargetBpm(bpm);
+  syncPracticePeakPickingPipeline();
+  collector.setSettings(sequenceSettings);
+  if (resetTempo) {
+    pipeline?.resetTempo();
+    resetPracticeEstimate(bpm);
+    resetMetronomeClock();
+  }
 }
 
 function practicePatternPassDirection(cycleKey: number): PracticePatternPassDirection {
@@ -1767,20 +1823,25 @@ function practicePatternOverallFeedbackText(): string {
       : "After first pass";
   }
 
-  const direction = summary.direction === "backward" ? "Back" : "Fwd";
+  const messages: string[] = [];
+  if (summary.bleedDetected && summary.bleedFrameRatio >= 0.12) {
+    messages.push("Avoid extra string");
+  }
+  if (summary.wrong > 0) {
+    messages.push("Check notes");
+  }
   const tempoText =
     summary.tempoStatus === "play-faster"
-      ? "faster"
+      ? "Play faster"
       : summary.tempoStatus === "play-slower"
-        ? "slower"
+        ? "Play slower"
         : summary.tempoStatus === "on-tempo"
-          ? "tempo"
-          : "timing?";
-  const notesText = `${summary.correct}/${summary.total}`;
-  const bleedText = summary.bleedDetected
-    ? ` · bleed ${Math.round(summary.bleedFrameRatio * 100)}%`
-    : "";
-  return `${direction} · ${tempoText} · ${notesText}${bleedText}`;
+          ? "On tempo"
+          : "";
+  if (tempoText) {
+    messages.push(tempoText);
+  }
+  return messages.slice(0, 2).join(" · ") || "Good round";
 }
 
 function renderPracticeDebug(): string {
