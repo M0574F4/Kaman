@@ -88,7 +88,6 @@ type BeatBatch = {
 type PracticePatternNote = {
   midi: number;
   label: "Re" | "La";
-  stringLabel: "S1" | "S2" | "S3" | "S4";
 };
 
 type PracticePattern = {
@@ -111,10 +110,10 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
     defaultLoop: true,
     defaultCountInBeats: 4,
     notes: [
-      ...makeWarmupGroup(62, "Re", "S1"),
-      ...makeWarmupGroup(69, "La", "S2"),
-      ...makeWarmupGroup(62, "Re", "S3"),
-      ...makeWarmupGroup(69, "La", "S4"),
+      ...makeWarmupGroup(74, "Re"),
+      ...makeWarmupGroup(69, "La"),
+      ...makeWarmupGroup(62, "Re"),
+      ...makeWarmupGroup(57, "La"),
     ],
   },
 ];
@@ -2489,7 +2488,6 @@ function renderStaffPracticePattern(nowMs: number): string {
         </div>
         ${playedNoteHtml}
         <div class="practice-pattern-target">${note.label}</div>
-        <div class="practice-pattern-string">${note.stringLabel}</div>
         <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
       </div>
     `;
@@ -2859,9 +2857,8 @@ function asBeatUnit(value: string): BeatUnit {
 function makeWarmupGroup(
   midi: number,
   label: PracticePatternNote["label"],
-  stringLabel: PracticePatternNote["stringLabel"],
 ): PracticePatternNote[] {
-  return Array.from({ length: 4 }, () => ({ midi, label, stringLabel }));
+  return Array.from({ length: 4 }, () => ({ midi, label }));
 }
 
 function practicePatternById(id: string): PracticePattern {

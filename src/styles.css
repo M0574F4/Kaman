@@ -893,7 +893,6 @@ button.primary {
 }
 
 .practice-pattern-target,
-.practice-pattern-string,
 .practice-pattern-played {
   position: absolute;
   left: 0;
@@ -906,16 +905,10 @@ button.primary {
 }
 
 .practice-pattern-target {
-  bottom: 40px;
+  bottom: 28px;
   color: #1f2f2a;
   font-size: 0.7rem;
   font-weight: 700;
-}
-
-.practice-pattern-string {
-  bottom: 27px;
-  color: #7b705f;
-  font-size: 0.58rem;
 }
 
 .practice-pattern-played {
