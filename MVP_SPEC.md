@@ -1,7 +1,7 @@
-# Violin Practice Web App MVP Spec
+# Kaman Practice Web App MVP Spec
 
 ## 1) Product Goal
-Build a mobile-first web app (also laptop-browser compatible) for violin practice with two modes:
+Build a mobile-first web app (also laptop-browser compatible) for Kamancheh practice with two modes:
 - Live Note Mode: show the current played note in near real time.
 - Sequence Mode: record a played phrase and render pitch plus rhythm on a standard 5-line staff.
 
@@ -9,7 +9,7 @@ The app must support Do-Re-Mi naming and score-like visualization rather than te
 
 ## 2) Scope
 ### In Scope (MVP)
-- Monophonic violin input via browser microphone.
+- Monophonic Kamancheh input via browser microphone.
 - Real-time pitch detection with confidence score.
 - Do-Re-Mi note labels (fixed Do by default).
 - Live display: current note on staff + textual solfege.
@@ -36,7 +36,7 @@ Purpose: low-latency pitch feedback.
 
 Required settings:
 - Reference tuning: A4 = 440 Hz (default), optional 442/443.
-- Pitch range filter: violin-relevant range (default G3 to E7).
+- Pitch range filter: Kamancheh-relevant range (default G3 to E7).
 - Display notation:
   - Staff placement enabled.
   - Solfege labels enabled (`Do Re Mi Fa Sol La Si`).
@@ -157,7 +157,7 @@ type SequenceSettings = {
 - minRestMs: 140
 
 ## 13) Validation Plan (Before Feature Expansion)
-- Build a fixed set of 15-20 violin exercises:
+- Build a fixed set of 15-20 Kamancheh exercises:
   - long tones
   - scale fragments
   - simple rhythmic patterns (quarter/eighth mixes)

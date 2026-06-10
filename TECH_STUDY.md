@@ -1,11 +1,11 @@
-# Violin Note Recognition Technical Study
+# Kamancheh Note Recognition Technical Study
 
 ## Objective
-Design a browser-based monophonic violin recognizer that supports:
+Design a browser-based monophonic Kamancheh recognizer that supports:
 - Live note feedback with low latency.
 - Start/stop sequence capture with rhythm discretization for staff display.
 
-## 1) Input Signal Characteristics (Violin-Specific)
+## 1) Input Signal Characteristics (Kamancheh-Specific)
 - Strong harmonic content can cause octave/harmonic confusion in naive FFT peak methods.
 - Vibrato introduces periodic frequency modulation (pitch center remains stable musically).
 - Bow attacks can be noisy and unstable before the tone settles.
@@ -28,7 +28,7 @@ Use:
 ### B) Autocorrelation / YIN Family (Recommended)
 Pros:
 - Better fundamental estimation for monophonic instruments.
-- Works well with violin when paired with confidence gating.
+- Works well with bowed strings when paired with confidence gating.
 
 Cons:
 - Requires careful window sizing and thresholds.

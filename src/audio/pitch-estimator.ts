@@ -1,4 +1,4 @@
-import type { PitchFrame, ViolinStringName } from "./types";
+import type { InstrumentStringName, PitchFrame } from "./types";
 
 export interface PitchEstimator {
   process(input: Float32Array, tMs: number): PitchFrame;
@@ -136,7 +136,7 @@ export class AutoCorrelationPitchEstimator implements PitchEstimator {
 }
 
 type OpenString = {
-  name: ViolinStringName;
+  name: InstrumentStringName;
   freqHz: number;
 };
 
@@ -150,8 +150,8 @@ const OPEN_STRINGS: OpenString[] = [
 type ContaminationMetrics = {
   purity: number;
   bleedRatio: number;
-  primaryString: ViolinStringName;
-  bleedString: ViolinStringName | null;
+  primaryString: InstrumentStringName;
+  bleedString: InstrumentStringName | null;
 };
 
 function estimateAdjacentStringBleed(

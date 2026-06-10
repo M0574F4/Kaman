@@ -288,7 +288,7 @@ let ui: UiRefs | null = null;
 function mountUi(): void {
   appRoot.innerHTML = `
     <main class="panel">
-      <h1>Violin Practice MVP</h1>
+      <h1>Kaman Practice MVP</h1>
       <div class="controls">
         <button id="listen-btn" class="primary">Start Listening</button>
         <select id="mode-select" aria-label="Mode">

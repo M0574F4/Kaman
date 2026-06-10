@@ -1,6 +1,6 @@
-# Violin Practice Web App
+# Kaman Practice Web App
 
-A browser-based violin practice app for turning microphone input into useful musical feedback. It listens to monophonic violin playing, estimates pitch in real time, labels notes with fixed-Do solfege, and renders practice output on a simple staff.
+A browser-based Kamancheh practice app for turning microphone input into useful musical feedback. It listens to monophonic playing, estimates pitch in real time, labels notes with fixed-Do solfege, and renders practice output on a simple staff.
 
 The app is built as a TypeScript/Vite frontend and is designed for both mobile and desktop browsers. Current modes include live note feedback, sequence capture for short phrases, spectrum visualization, tempo-aware rhythm checks, and basic staff-oriented practice tools.
 

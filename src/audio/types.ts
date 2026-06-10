@@ -1,4 +1,4 @@
-export type ViolinStringName = "G" | "D" | "A" | "E";
+export type InstrumentStringName = "G" | "D" | "A" | "E";
 
 export type PitchFrame = {
   tMs: number;
@@ -9,8 +9,8 @@ export type PitchFrame = {
   confidence: number;
   stringPurity: number | null;
   adjacentBleedRatio: number | null;
-  primaryString: ViolinStringName | null;
-  bleedString: ViolinStringName | null;
+  primaryString: InstrumentStringName | null;
+  bleedString: InstrumentStringName | null;
 };
 
 export type SpectrumFrame = {

@@ -1,4 +1,4 @@
-import type { PitchFrame, SpectrumFrame, ViolinStringName } from "../audio/types";
+import type { InstrumentStringName, PitchFrame, SpectrumFrame } from "../audio/types";
 import { midiToScientific, midiToSolfege } from "../notation/solfege";
 
 export const SPECTRUM_MIN_FREQ_HZ = 180;
@@ -8,7 +8,7 @@ const TIME_WINDOW_MS = 6500;
 const MIN_COLUMN_MS = 18;
 const DB_FLOOR = -92;
 const DB_CEILING = -22;
-const OPEN_STRING_FREQUENCIES: Record<ViolinStringName, number> = {
+const OPEN_STRING_FREQUENCIES: Record<InstrumentStringName, number> = {
   G: 196,
   D: 293.66,
   A: 440,
@@ -187,7 +187,7 @@ function renderHarmonicGuides(
 }
 
 function renderBleedGuides(
-  stringName: ViolinStringName,
+  stringName: InstrumentStringName,
   bleedRatio: number,
   minBleedScore: number,
 ): string {
