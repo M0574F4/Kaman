@@ -211,19 +211,37 @@ button.primary {
   align-items: center;
   justify-content: center;
   align-self: stretch;
-  gap: 0.25rem;
-  padding: 0.35rem 0.45rem;
+  position: relative;
+  width: 2.35rem;
+  padding: 0.35rem;
   border: 1px solid #ddd1be;
   border-radius: 8px;
   background: #fffdf8;
   color: #1f2f2a;
-  font-size: 1rem;
+  font-size: 1.08rem;
   line-height: 1;
   cursor: pointer;
 }
 
-.metronome-sound-toggle input {
-  margin: 0;
+.metronome-sound-toggle .speaker-glyph {
+  display: block;
+}
+
+.metronome-sound-toggle:not(.is-on)::after {
+  content: "×";
+  position: absolute;
+  right: 0.34rem;
+  top: 0.18rem;
+  color: #b42318;
+  font-size: 1.08rem;
+  font-weight: 800;
+  line-height: 1;
+  text-shadow: 0 1px 0 #fffdf8;
+}
+
+.metronome-sound-toggle.is-on {
+  border-color: #9bc2a6;
+  background: #f1faf3;
 }
 
 .beat-batch-box {

@@ -216,6 +216,7 @@ let enableVisualMetronome = true;
 let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
 let minBleedScore = 0.14;
+let practiceBleedSensitivity = 0.3;
 let practicePeakThreshold = 50;
 let practicePeakMergeMs = defaultPracticePeakMergeMs(sequenceSettings.bpm);
 let practicePeakMergeTouched = false;
@@ -296,6 +297,7 @@ type UiRefs = {
   practicePatternReadout: HTMLSpanElement;
   practiceToleranceInput: HTMLInputElement;
   practiceSensitivityInput: HTMLInputElement;
+  practiceBleedSensitivityInput: HTMLInputElement;
   practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
   practiceDebugSection: HTMLDivElement;
@@ -319,7 +321,7 @@ type UiRefs = {
   beatUnitSelect: HTMLSelectElement;
   toleranceInput: HTMLInputElement;
   visualMetronomeToggle: HTMLInputElement;
-  soundMetronomeToggle: HTMLInputElement;
+  soundMetronomeToggle: HTMLButtonElement;
   bleedThresholdInput: HTMLInputElement;
   stringPurityToggle: HTMLInputElement;
   exactToggle: HTMLInputElement;
@@ -397,10 +399,9 @@ function mountUi(): void {
                 <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
               </div>
             </div>
-            <label class="metronome-sound-toggle" for="sound-metronome-toggle" aria-label="Metronome sound">
-              <input id="sound-metronome-toggle" type="checkbox" />
-              <span aria-hidden="true">🔊</span>
-            </label>
+            <button id="sound-metronome-toggle" type="button" class="metronome-sound-toggle" aria-label="Metronome sound off" aria-pressed="false">
+              <span class="speaker-glyph" aria-hidden="true">🔈</span>
+            </button>
             <div id="metronome-box" class="metronome-box"></div>
           </div>
         </section>
@@ -424,6 +425,9 @@ function mountUi(): void {
               </label>
               <label>Sens
                 <input id="practice-sensitivity" type="number" min="0.1" max="0.95" step="0.01" value="0.55" />
+              </label>
+              <label>Bleed
+                <input id="practice-bleed-sensitivity" type="number" min="0.05" max="0.49" step="0.01" value="0.30" />
               </label>
               <label>Correction
                 <select id="practice-correction-source">
@@ -582,6 +586,7 @@ function mountUi(): void {
   const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
   const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
   const practiceSensitivityInput = appRoot.querySelector<HTMLInputElement>("#practice-sensitivity");
+  const practiceBleedSensitivityInput = appRoot.querySelector<HTMLInputElement>("#practice-bleed-sensitivity");
   const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
   const practiceDebugSection = appRoot.querySelector<HTMLDivElement>("#practice-debug-section");
@@ -605,7 +610,7 @@ function mountUi(): void {
   const beatUnitSelect = appRoot.querySelector<HTMLSelectElement>("#beat-unit-select");
   const toleranceInput = appRoot.querySelector<HTMLInputElement>("#tolerance-input");
   const visualMetronomeToggle = appRoot.querySelector<HTMLInputElement>("#visual-metronome-toggle");
-  const soundMetronomeToggle = appRoot.querySelector<HTMLInputElement>("#sound-metronome-toggle");
+  const soundMetronomeToggle = appRoot.querySelector<HTMLButtonElement>("#sound-metronome-toggle");
   const bleedThresholdInput = appRoot.querySelector<HTMLInputElement>("#bleed-threshold-input");
   const stringPurityToggle = appRoot.querySelector<HTMLInputElement>("#string-purity-toggle");
   const exactToggle = appRoot.querySelector<HTMLInputElement>("#exact-pitch-toggle");
@@ -647,6 +652,7 @@ function mountUi(): void {
     !practicePatternReadout ||
     !practiceToleranceInput ||
     !practiceSensitivityInput ||
+    !practiceBleedSensitivityInput ||
     !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
     !practiceDebugSection ||
@@ -715,6 +721,7 @@ function mountUi(): void {
     practicePatternReadout,
     practiceToleranceInput,
     practiceSensitivityInput,
+    practiceBleedSensitivityInput,
     practiceCorrectionSourceSelect,
     practiceDebugToggle,
     practiceDebugSection,
@@ -968,6 +975,26 @@ function mountUi(): void {
     scheduleRender();
   });
 
+  practiceBleedSensitivityInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = Number.parseFloat(target.value);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    practiceBleedSensitivity = clamp(parsed, 0.05, 0.49);
+    scheduleRender();
+  });
+
+  practiceBleedSensitivityInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = Number.parseFloat(target.value);
+    practiceBleedSensitivity = Number.isFinite(parsed)
+      ? clamp(parsed, 0.05, 0.49)
+      : 0.3;
+    target.value = practiceBleedSensitivity.toFixed(2);
+    scheduleRender();
+  });
+
   practiceCorrectionSourceSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     practiceCorrectionSource = asPracticeCorrectionSource(target.value);
@@ -1039,9 +1066,8 @@ function mountUi(): void {
     scheduleRender();
   });
 
-  soundMetronomeToggle.addEventListener("change", (event) => {
-    const target = event.target as HTMLInputElement;
-    enableMetronomeSound = target.checked;
+  soundMetronomeToggle.addEventListener("click", () => {
+    enableMetronomeSound = !enableMetronomeSound;
     if (enableMetronomeSound) {
       void ensureSharedAudioContext();
     }
@@ -1153,6 +1179,9 @@ function render(): void {
   if (activeElement !== ui.practiceSensitivityInput) {
     ui.practiceSensitivityInput.value = liveSettings.confidenceThreshold.toFixed(2);
   }
+  if (activeElement !== ui.practiceBleedSensitivityInput) {
+    ui.practiceBleedSensitivityInput.value = practiceBleedSensitivity.toFixed(2);
+  }
   ui.practiceCorrectionSourceSelect.value = practiceCorrectionSource;
   ui.practiceDebugToggle.checked = showPracticeDebug;
   ui.practiceDebugSection.style.display = showPracticeDebug ? "block" : "none";
@@ -1168,7 +1197,12 @@ function render(): void {
   ui.beatUnitSelect.disabled = sequenceSubMode === "single-beat";
   ui.toleranceInput.value = String(beatToleranceMs);
   ui.visualMetronomeToggle.checked = enableVisualMetronome;
-  ui.soundMetronomeToggle.checked = enableMetronomeSound;
+  ui.soundMetronomeToggle.classList.toggle("is-on", enableMetronomeSound);
+  ui.soundMetronomeToggle.setAttribute(
+    "aria-label",
+    enableMetronomeSound ? "Metronome sound on" : "Metronome sound off",
+  );
+  ui.soundMetronomeToggle.setAttribute("aria-pressed", String(enableMetronomeSound));
   if (document.activeElement !== ui.bleedThresholdInput) {
     ui.bleedThresholdInput.value = minBleedScore.toFixed(2);
   }
@@ -1656,9 +1690,12 @@ function createPracticePatternPassAccumulator(): PracticePatternPassAccumulator 
 }
 
 function capturePracticePatternBleedFrame(frame: PitchFrame): void {
+  if (!isAudiblePracticeFrame(frame)) {
+    return;
+  }
   practicePatternPassAccumulator.frameCount += 1;
   const bleedRatio = frame.adjacentBleedRatio ?? 0;
-  if (bleedRatio < minBleedScore) {
+  if (bleedRatio < practiceBleedSensitivity) {
     return;
   }
   practicePatternPassAccumulator.bleedFrameCount += 1;
@@ -1671,11 +1708,21 @@ function capturePracticePatternBleedFrame(frame: PitchFrame): void {
 }
 
 function practiceBleedMidi(frame: PitchFrame): number | null {
+  if (!isAudiblePracticeFrame(frame)) {
+    return null;
+  }
   const bleedRatio = frame.adjacentBleedRatio ?? 0;
-  if (bleedRatio < minBleedScore || !frame.bleedString) {
+  if (bleedRatio < practiceBleedSensitivity || !frame.bleedString) {
     return null;
   }
   return openStringMidi(frame.bleedString);
+}
+
+function isAudiblePracticeFrame(frame: PitchFrame): boolean {
+  return (
+    frame.midi !== null &&
+    frame.confidence >= liveSettings.confidenceThreshold
+  );
 }
 
 function openStringMidi(stringName: "G" | "D" | "A" | "E"): number {
@@ -1756,8 +1803,7 @@ function practicePatternTraversalOrder(pattern = selectedPracticePattern()): num
   ) {
     return forward;
   }
-  const backwardMiddle = forward.slice(1, -1).reverse();
-  return [...forward, ...backwardMiddle];
+  return [...forward, ...[...forward].reverse()];
 }
 
 function practicePatternResultCycleKey(
