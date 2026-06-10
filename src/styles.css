@@ -415,6 +415,15 @@ button.primary {
   font-size: 0.86rem;
 }
 
+.practice-pattern-loop {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  color: #4f5d5e;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
 .practice-pattern-copy {
   min-width: 0;
   display: flex;

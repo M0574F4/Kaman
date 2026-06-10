@@ -1089,13 +1089,12 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   }
 
   const pattern = selectedPracticePattern();
-  const noteDurationMs = practicePatternNoteDurationMs();
-  const totalDurationMs = pattern.notes.length * noteDurationMs;
   const startMs = performance.now();
 
   practicePatternResults = createPracticePatternResults();
   practicePatternPlaying = true;
   practicePatternActiveIndex = 0;
+  practicePatternCycleIndex = 0;
   practicePatternStartedAtMs = startMs;
   metronomeStartMs = startMs;
   metronomeLastTickIndex = null;
@@ -1103,14 +1102,7 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   pipeline?.resetTempo();
   resetPracticeEstimate(sequenceSettings.bpm);
   syncMetronomeAnimationLoop();
-
-  if (practicePatternStopTimer !== null) {
-    window.clearTimeout(practicePatternStopTimer);
-  }
-  practicePatternStopTimer = window.setTimeout(() => {
-    markElapsedPracticePatternSlots(pattern.notes.length);
-    stopPracticePatternPlayback(false);
-  }, totalDurationMs + 140);
+  syncPracticePatternStopTimer(pattern);
 
   scheduleRender();
 }
@@ -1119,6 +1111,7 @@ function stopPracticePatternPlayback(resetResults: boolean): void {
   practicePatternPlaying = false;
   practicePatternActiveIndex = null;
   practicePatternStartedAtMs = 0;
+  practicePatternCycleIndex = 0;
   if (practicePatternStopTimer !== null) {
     window.clearTimeout(practicePatternStopTimer);
     practicePatternStopTimer = null;
@@ -1129,6 +1122,32 @@ function stopPracticePatternPlayback(resetResults: boolean): void {
   scheduleRender();
 }
 
+function syncPracticePatternStopTimer(pattern = selectedPracticePattern()): void {
+  if (practicePatternStopTimer !== null) {
+    window.clearTimeout(practicePatternStopTimer);
+    practicePatternStopTimer = null;
+  }
+
+  if (!practicePatternPlaying || practicePatternLoopEnabled || pattern.notes.length === 0) {
+    return;
+  }
+
+  const cycleDurationMs = pattern.notes.length * practicePatternNoteDurationMs();
+  const elapsedMs = performance.now() - practicePatternStartedAtMs;
+  const remainingMs = cycleDurationMs - elapsedMs + 140;
+
+  if (remainingMs <= 0) {
+    markElapsedPracticePatternSlots(pattern.notes.length);
+    stopPracticePatternPlayback(false);
+    return;
+  }
+
+  practicePatternStopTimer = window.setTimeout(() => {
+    markElapsedPracticePatternSlots(pattern.notes.length);
+    stopPracticePatternPlayback(false);
+  }, remainingMs);
+}
+
 function practicePatternNoteDurationMs(): number {
   return metronomeBeatDurationMs();
 }
@@ -1137,15 +1156,29 @@ function practicePatternCurrentIndex(nowMs: number): number | null {
   if (!practicePatternPlaying || practicePatternStartedAtMs <= 0) {
     return null;
   }
+  const pattern = selectedPracticePattern();
+  if (pattern.notes.length === 0) {
+    return null;
+  }
   const elapsedMs = nowMs - practicePatternStartedAtMs;
   if (elapsedMs < 0) {
     return null;
   }
-  const index = Math.floor(elapsedMs / practicePatternNoteDurationMs());
-  if (index < 0 || index >= selectedPracticePattern().notes.length) {
+  const noteDurationMs = practicePatternNoteDurationMs();
+  const cycleDurationMs = pattern.notes.length * noteDurationMs;
+  const cycleIndex = Math.floor(elapsedMs / cycleDurationMs);
+  if (!practicePatternLoopEnabled && cycleIndex > 0) {
     return null;
   }
-  return index;
+  if (practicePatternLoopEnabled && cycleIndex !== practicePatternCycleIndex) {
+    practicePatternCycleIndex = cycleIndex;
+    practicePatternResults = createPracticePatternResults();
+  }
+  const cycleElapsedMs = practicePatternLoopEnabled
+    ? elapsedMs % cycleDurationMs
+    : elapsedMs;
+  const index = Math.floor(cycleElapsedMs / noteDurationMs);
+  return index >= 0 && index < pattern.notes.length ? index : null;
 }
 
 function capturePracticePatternFrame(frame: PitchFrame): void {
@@ -1207,7 +1240,8 @@ function practicePatternReadoutText(): string {
       ? ""
       : ` | note ${practicePatternActiveIndex + 1}/${pattern.notes.length}`;
   const score = correct > 0 || wrong > 0 ? ` | ${correct} correct, ${wrong} wrong` : "";
-  return `${practicePatternLabels(pattern)}${active}${score}`;
+  const loop = practicePatternLoopEnabled ? " | loop on" : "";
+  return `${practicePatternLabels(pattern)}${active}${score}${loop}`;
 }
 
 function resetPracticeEstimate(targetBpm = sequenceSettings.bpm): void {
@@ -1233,6 +1267,7 @@ function renderPracticePanel(): void {
   ui.practiceStatus.className = `practice-status status-${statusClass}`;
   ui.practiceStatus.textContent = statusLabel;
   ui.practicePatternSelect.value = pattern.id;
+  ui.practicePatternLoopToggle.checked = practicePatternLoopEnabled;
   ui.practicePatternName.textContent = pattern.name;
   ui.practicePatternPlayBtn.textContent = practicePatternPlaying ? "■" : "▶";
   ui.practicePatternPlayBtn.setAttribute(
