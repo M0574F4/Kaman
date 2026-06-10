@@ -866,6 +866,10 @@ button.primary {
   filter: drop-shadow(0 0 5px rgba(27, 67, 50, 0.3));
 }
 
+.practice-pattern-played-note {
+  z-index: 3;
+}
+
 .practice-pattern-ledger-line {
   position: absolute;
   left: 50%;
@@ -873,6 +877,10 @@ button.primary {
   height: 1px;
   transform: translateX(-50%);
   background: #78654b;
+}
+
+.practice-pattern-ledger-line.played {
+  background: #b00020;
 }
 
 .practice-pattern-target,
@@ -968,19 +976,24 @@ button.primary {
   top: 6px;
 }
 
-.staff-batch-note.practice-pattern-note .staff-batch-note-head {
-  background: #fffef9;
-  border-color: #111111;
+.staff-batch-note.practice-pattern-note .staff-batch-note-head,
+.staff-batch-note.practice-pattern-note .staff-batch-note-stem {
+  background: #111111;
 }
 
-.staff-batch-note.practice-pattern-note.status-correct .staff-batch-note-head {
-  border-color: #2d6a4f;
-  background: #e9f4ee;
+.staff-batch-note.practice-pattern-note.status-correct .staff-batch-note-head,
+.staff-batch-note.practice-pattern-note.status-correct .staff-batch-note-stem {
+  background: #2d6a4f;
 }
 
-.staff-batch-note.practice-pattern-note.status-wrong .staff-batch-note-head {
-  border-color: #b00020;
-  background: #fdecef;
+.staff-batch-note.practice-pattern-note.status-wrong .staff-batch-note-head,
+.staff-batch-note.practice-pattern-note.status-wrong .staff-batch-note-stem {
+  background: #111111;
+}
+
+.staff-batch-note.practice-pattern-played-note .staff-batch-note-head,
+.staff-batch-note.practice-pattern-played-note .staff-batch-note-stem {
+  background: #b00020;
 }
 
 .staff-batch-note-stem {

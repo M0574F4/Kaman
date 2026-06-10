@@ -2394,6 +2394,10 @@ function renderStaffPracticePattern(nowMs: number): string {
     const stemDirection = stemDirectionForMidi(note.midi);
     const statusClass = `status-${result.status}`;
     const activeClass = activeIndex === index ? "active" : "";
+    const playedNoteHtml =
+      result.status === "wrong" && result.playedMidi !== null
+        ? renderPracticePlayedNote(result.playedMidi)
+        : "";
     const playedLabel =
       result.playedMidi === null
         ? "&nbsp;"
@@ -2402,9 +2406,11 @@ function renderStaffPracticePattern(nowMs: number): string {
     return `
       <div class="practice-pattern-slot">
         ${ledgers}
-        <div class="staff-batch-note value-whole practice-pattern-note ${statusClass} ${activeClass} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
+        <div class="staff-batch-note value-quarter practice-pattern-note ${statusClass} ${activeClass} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
           <div class="staff-batch-note-head"></div>
+          <div class="staff-batch-note-stem"></div>
         </div>
+        ${playedNoteHtml}
         <div class="practice-pattern-target">${note.label}</div>
         <div class="practice-pattern-string">${note.stringLabel}</div>
         <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
@@ -2415,6 +2421,22 @@ function renderStaffPracticePattern(nowMs: number): string {
   return `
     <div class="practice-pattern-grid" style="--pattern-cols:${pattern.notes.length}">
       ${slots}
+    </div>
+  `;
+}
+
+function renderPracticePlayedNote(midi: number): string {
+  const y = midiToStaffY(midi);
+  const stemDirection = stemDirectionForMidi(midi);
+  const ledgers = ledgerLineYs(midi)
+    .map((lineY) => `<div class="practice-pattern-ledger-line played" style="top:${lineY.toFixed(1)}px"></div>`)
+    .join("");
+
+  return `
+    ${ledgers}
+    <div class="staff-batch-note value-quarter practice-pattern-played-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="Played ${midiToScientific(midi)}">
+      <div class="staff-batch-note-head"></div>
+      <div class="staff-batch-note-stem"></div>
     </div>
   `;
 }
