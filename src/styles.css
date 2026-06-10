@@ -36,6 +36,10 @@ body {
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
 }
 
+#app[data-mode="practice"] .panel {
+  width: min(1180px, 100%);
+}
+
 h1 {
   margin: 0 0 0.75rem;
   font-size: clamp(1.35rem, 3vw, 2rem);
@@ -394,6 +398,54 @@ button.primary {
   font-weight: 700;
   color: #1f2f2a;
   background: #e9f4ee;
+}
+
+.practice-feedback-grid {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.7fr) minmax(0, 1.3fr);
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.practice-feedback-card {
+  min-width: 0;
+  padding: 0.5rem;
+  border: 1px solid #e4d8c6;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.practice-feedback-card > span {
+  display: block;
+  margin-bottom: 0.28rem;
+  color: #60706b;
+  font-size: 0.72rem;
+  line-height: 1.1;
+}
+
+.practice-overall-feedback {
+  min-height: 2.2rem;
+  padding: 0.3rem 0.48rem;
+  border-radius: 8px;
+  color: #1f2f2a;
+  background: #f3f5f2;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.practice-overall-feedback.status-play-faster {
+  background: #e1f2e8;
+  color: #173c2e;
+}
+
+.practice-overall-feedback.status-play-slower {
+  background: #f8e8d5;
+  color: #5d2e0b;
+}
+
+.practice-overall-feedback.status-on-tempo {
+  background: #dcebe3;
+  color: #173c2e;
 }
 
 .practice-status.status-play-faster {
@@ -755,6 +807,20 @@ button.primary {
   overflow: hidden;
 }
 
+.staff.practice-sheet-active {
+  height: min(66dvh, 560px);
+  min-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  border: 1px solid #c7b798;
+  border-radius: 8px;
+}
+
+.staff.practice-sheet-active > .staff-line {
+  display: none;
+}
+
 .staff.sheet-entry-active {
   cursor: crosshair;
 }
@@ -885,6 +951,12 @@ button.primary {
   display: none;
 }
 
+.staff.practice-sheet-active .staff-batch-layer {
+  position: relative;
+  inset: auto;
+  min-height: 100%;
+}
+
 .staff-batch-grid {
   position: absolute;
   inset: 0;
@@ -908,6 +980,33 @@ button.primary {
   z-index: 2;
   display: grid;
   grid-template-columns: repeat(var(--pattern-cols, 16), minmax(0, 1fr));
+}
+
+.practice-sheet {
+  position: relative;
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.75rem 0.85rem 1rem;
+}
+
+.practice-sheet-row {
+  position: relative;
+  min-height: 260px;
+  border: 1px solid rgba(120, 101, 75, 0.16);
+  border-radius: 8px;
+  background: #fffef9;
+  overflow: hidden;
+}
+
+.practice-sheet-lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.practice-sheet-row .practice-pattern-grid {
+  position: absolute;
+  inset: 0;
 }
 
 .sheet-entry-grid {
@@ -990,6 +1089,14 @@ button.primary {
   position: relative;
   min-width: 0;
   border-right: 1px dashed rgba(120, 101, 75, 0.18);
+}
+
+.practice-pattern-slot.placeholder {
+  opacity: 0.28;
+}
+
+.practice-pattern-slot.active-slot {
+  background: linear-gradient(180deg, rgba(45, 106, 79, 0.1), transparent 60%);
 }
 
 .practice-pattern-slot:last-child {
@@ -1274,5 +1381,32 @@ pre {
 
   .sequence-controls {
     grid-template-columns: repeat(5, minmax(90px, 1fr));
+  }
+
+  #app[data-mode="practice"] .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #app[data-mode="practice"] .output-card {
+    order: 1;
+  }
+
+  #app[data-mode="practice"] .visual-card {
+    order: 2;
+  }
+}
+
+@media (max-width: 720px) {
+  .practice-feedback-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .practice-pattern-controls {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .practice-pattern-copy {
+    flex: 1 1 100%;
   }
 }

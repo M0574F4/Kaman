@@ -108,6 +108,28 @@ type PracticePatternResult = {
   playedMidi: number | null;
 };
 
+type PracticePatternPassDirection = "forward" | "backward";
+
+type PracticePatternPassSummary = {
+  direction: PracticePatternPassDirection;
+  correct: number;
+  wrong: number;
+  total: number;
+  tempoStatus: TempoFrame["status"];
+  tempoLabel: string;
+  bleedDetected: boolean;
+  bleedFrameRatio: number;
+  bleedString: string | null;
+};
+
+type PracticePatternPassAccumulator = {
+  tempoCounts: Record<"play-faster" | "play-slower" | "on-tempo", number>;
+  tempoSamples: number;
+  frameCount: number;
+  bleedFrameCount: number;
+  bleedStringCounts: Map<string, number>;
+};
+
 type PracticePatternPosition = {
   noteIndex: number;
   stepIndex: number;
@@ -164,6 +186,7 @@ const TRAIL_DURATION_MS = 1400;
 const TRAIL_START_LEFT_PCT = 58;
 const TRAIL_END_LEFT_PCT = 2;
 const BATCH_FADE_MS = 1700;
+const PRACTICE_PATTERN_NOTES_PER_ROW = 8;
 
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
@@ -191,8 +214,11 @@ let practicePatternPlaying = false;
 let practicePatternStartedAtMs = 0;
 let practicePatternActiveIndex: number | null = null;
 let practicePatternCycleIndex = 0;
+let practicePatternLastScrolledRow = -1;
 let practicePatternStopTimer: number | null = null;
 let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
+let practicePatternPassSummary: PracticePatternPassSummary | null = null;
+let practicePatternPassAccumulator = createPracticePatternPassAccumulator();
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
 let sheetEntryTool: SheetEntryTool = "natural";
@@ -243,6 +269,7 @@ type UiRefs = {
   liveMetronomeControls: HTMLDivElement;
   practicePanel: HTMLDivElement;
   practiceStatus: HTMLDivElement;
+  practiceOverallFeedback: HTMLDivElement;
   practiceEstimate: HTMLParagraphElement;
   practiceDetail: HTMLParagraphElement;
   practicePatternSelect: HTMLSelectElement;
@@ -320,7 +347,7 @@ function mountUi(): void {
       <p id="capture-hint" class="muted"></p>
 
       <div class="grid">
-        <section class="card">
+        <section class="card visual-card">
           <div class="note-readout">
             <p id="note-metric" class="metric">- <span class="muted">(-)</span></p>
             <p id="bleed-note-line" class="bleed-note-line">&nbsp;</p>
@@ -348,7 +375,7 @@ function mountUi(): void {
           </div>
         </section>
 
-        <section class="card">
+        <section class="card output-card">
           <h2 id="output-title">Sequence Output</h2>
           <div id="live-metronome-controls" class="sequence-controls live-metro-controls">
             <label>Target BPM
@@ -362,7 +389,16 @@ function mountUi(): void {
             </label>
           </div>
           <div id="practice-panel" class="practice-panel">
-            <div id="practice-status" class="practice-status status-idle">-</div>
+            <div class="practice-feedback-grid">
+              <div class="practice-feedback-card instant">
+                <span>Now</span>
+                <div id="practice-status" class="practice-status status-idle">-</div>
+              </div>
+              <div class="practice-feedback-card overall">
+                <span>Round feedback</span>
+                <div id="practice-overall-feedback" class="practice-overall-feedback">Play a full round to get pattern feedback.</div>
+              </div>
+            </div>
             <div class="practice-pattern-controls">
               <select id="practice-pattern-select" class="practice-pattern-select" aria-label="Practice pattern">
                 ${PRACTICE_PATTERNS.map(
@@ -382,7 +418,7 @@ function mountUi(): void {
               <button id="practice-pattern-play" type="button" class="practice-pattern-play" aria-label="Start Warmup 1">▶</button>
               <div class="practice-pattern-copy">
                 <strong id="practice-pattern-name">Warmup 1</strong>
-                <span id="practice-pattern-readout">Re Re Re Re | La La La La | Re Re Re Re | La La La La</span>
+                <span id="practice-pattern-readout">Ready</span>
               </div>
             </div>
             <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
@@ -516,6 +552,7 @@ function mountUi(): void {
   const liveMetronomeControls = appRoot.querySelector<HTMLDivElement>("#live-metronome-controls");
   const practicePanel = appRoot.querySelector<HTMLDivElement>("#practice-panel");
   const practiceStatus = appRoot.querySelector<HTMLDivElement>("#practice-status");
+  const practiceOverallFeedback = appRoot.querySelector<HTMLDivElement>("#practice-overall-feedback");
   const practiceEstimate = appRoot.querySelector<HTMLParagraphElement>("#practice-estimate");
   const practiceDetail = appRoot.querySelector<HTMLParagraphElement>("#practice-detail");
   const practicePatternSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-select");
@@ -579,6 +616,7 @@ function mountUi(): void {
     !liveMetronomeControls ||
     !practicePanel ||
     !practiceStatus ||
+    !practiceOverallFeedback ||
     !practiceEstimate ||
     !practiceDetail ||
     !practicePatternSelect ||
@@ -645,6 +683,7 @@ function mountUi(): void {
     liveMetronomeControls,
     practicePanel,
     practiceStatus,
+    practiceOverallFeedback,
     practiceEstimate,
     practiceDetail,
     practicePatternSelect,
@@ -723,6 +762,9 @@ function mountUi(): void {
     practicePatternLoopEnabled = pattern.defaultLoop;
     practicePatternLoopMode = pattern.defaultLoopMode;
     practicePatternCountInBeats = pattern.defaultCountInBeats;
+    practicePatternPassSummary = null;
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    practicePatternLastScrolledRow = -1;
     stopPracticePatternPlayback(true);
     scheduleRender();
   });
@@ -1023,6 +1065,7 @@ function render(): void {
   const solfege = displayedMidi !== null ? midiToSolfege(displayedMidi) : "-";
   const scientific = displayedMidi !== null ? midiToScientific(displayedMidi) : "-";
   const stringPurityActive = isStringPurityActive();
+  appRoot.dataset.mode = state.mode;
 
   ui.listenBtn.textContent = state.listening ? "Stop Listening" : "Start Listening";
   ui.listenBtn.style.display =
@@ -1087,6 +1130,7 @@ function render(): void {
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
   ui.staff.classList.toggle("sheet-entry-active", state.mode === "sheet-entry");
+  ui.staff.classList.toggle("practice-sheet-active", state.mode === "practice");
   syncMetronomeAnimationLoop();
 
   const centsText = state.live.cents === null ? "" : ` (${formatSigned(state.live.cents)} cents)`;
@@ -1153,6 +1197,7 @@ function render(): void {
   } else if (practicePatternStaffActive) {
     ui.staffBatchLayer.style.display = "block";
     ui.staffBatchLayer.innerHTML = renderStaffPracticePattern(nowMs);
+    scrollPracticeSheetToActiveRow();
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -1277,9 +1322,12 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   const startMs = performance.now();
 
   practicePatternResults = createPracticePatternResults();
+  practicePatternPassSummary = null;
+  practicePatternPassAccumulator = createPracticePatternPassAccumulator();
   practicePatternPlaying = true;
   practicePatternActiveIndex = null;
   practicePatternCycleIndex = 0;
+  practicePatternLastScrolledRow = -1;
   metronomeStartMs = startMs;
   practicePatternStartedAtMs = startMs + practicePatternCountInBeats * practicePatternNoteDurationMs();
   metronomeLastTickIndex = null;
@@ -1297,12 +1345,15 @@ function stopPracticePatternPlayback(resetResults: boolean): void {
   practicePatternActiveIndex = null;
   practicePatternStartedAtMs = 0;
   practicePatternCycleIndex = 0;
+  practicePatternLastScrolledRow = -1;
   if (practicePatternStopTimer !== null) {
     window.clearTimeout(practicePatternStopTimer);
     practicePatternStopTimer = null;
   }
   if (resetResults) {
     practicePatternResults = createPracticePatternResults();
+    practicePatternPassSummary = null;
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
   }
   scheduleRender();
 }
@@ -1325,12 +1376,14 @@ function syncPracticePatternStopTimer(pattern = selectedPracticePattern()): void
 
   if (remainingMs <= 0) {
     markElapsedPracticePatternOrder(practicePatternTraversalOrder(pattern), pattern.notes.length, 0);
+    finalizePracticePatternPass(practicePatternCycleIndex, practicePatternTraversalOrder(pattern));
     stopPracticePatternPlayback(false);
     return;
   }
 
   practicePatternStopTimer = window.setTimeout(() => {
     markElapsedPracticePatternOrder(practicePatternTraversalOrder(pattern), pattern.notes.length, 0);
+    finalizePracticePatternPass(practicePatternCycleIndex, practicePatternTraversalOrder(pattern));
     stopPracticePatternPlayback(false);
   }, remainingMs);
 }
@@ -1366,8 +1419,10 @@ function practicePatternCurrentPosition(nowMs: number): PracticePatternPosition 
   const stepIndex = Math.floor(cycleElapsedMs / noteDurationMs);
   const cycleKey = practicePatternResultCycleKey(cycleIndex, stepIndex, pattern.notes.length);
   if (practicePatternLoopEnabled && cycleKey !== practicePatternCycleIndex) {
+    finalizePracticePatternPass(practicePatternCycleIndex, order);
     practicePatternCycleIndex = cycleKey;
     practicePatternResults = createPracticePatternResults();
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
   }
   const noteIndex = order[stepIndex];
   return noteIndex !== undefined
@@ -1394,6 +1449,7 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
     return;
   }
   markElapsedPracticePatternSteps(position);
+  capturePracticePatternBleedFrame(frame);
 
   const noteDurationMs = practicePatternNoteDurationMs();
   if (position.stepElapsedMs < noteDurationMs * 0.18) {
@@ -1448,6 +1504,146 @@ function markElapsedPracticePatternOrder(
   }
 }
 
+function finalizePracticePatternPass(cycleKey: number, order: number[]): void {
+  const pattern = selectedPracticePattern();
+  if (pattern.notes.length === 0) {
+    return;
+  }
+
+  const direction = practicePatternPassDirection(cycleKey);
+  const startStepIndex =
+    direction === "backward" && practicePatternLoopMode === "back-and-forth"
+      ? pattern.notes.length
+      : 0;
+  const endStepIndex =
+    direction === "backward" && practicePatternLoopMode === "back-and-forth"
+      ? order.length
+      : pattern.notes.length;
+  markElapsedPracticePatternOrder(order, endStepIndex, startStepIndex);
+
+  const passIndexes = order.slice(startStepIndex, endStepIndex);
+  const total = passIndexes.length;
+  if (total === 0) {
+    return;
+  }
+  const correct = passIndexes.filter(
+    (noteIndex) => practicePatternResults[noteIndex]?.status === "correct",
+  ).length;
+  const wrong = total - correct;
+  const tempoStatus = summarizePracticePassTempo(practicePatternPassAccumulator);
+  const bleedString = mostCommonBleedString(practicePatternPassAccumulator.bleedStringCounts);
+  practicePatternPassSummary = {
+    direction,
+    correct,
+    wrong,
+    total,
+    tempoStatus,
+    tempoLabel: practicePassTempoLabel(tempoStatus),
+    bleedDetected: practicePatternPassAccumulator.bleedFrameCount > 0,
+    bleedFrameRatio:
+      practicePatternPassAccumulator.bleedFrameCount /
+      Math.max(1, practicePatternPassAccumulator.frameCount),
+    bleedString,
+  };
+}
+
+function practicePatternPassDirection(cycleKey: number): PracticePatternPassDirection {
+  return practicePatternLoopMode === "back-and-forth" && cycleKey % 2 === 1
+    ? "backward"
+    : "forward";
+}
+
+function createPracticePatternPassAccumulator(): PracticePatternPassAccumulator {
+  return {
+    tempoCounts: {
+      "play-faster": 0,
+      "play-slower": 0,
+      "on-tempo": 0,
+    },
+    tempoSamples: 0,
+    frameCount: 0,
+    bleedFrameCount: 0,
+    bleedStringCounts: new Map<string, number>(),
+  };
+}
+
+function capturePracticePatternBleedFrame(frame: PitchFrame): void {
+  practicePatternPassAccumulator.frameCount += 1;
+  const bleedRatio = frame.adjacentBleedRatio ?? 0;
+  if (bleedRatio < minBleedScore) {
+    return;
+  }
+  practicePatternPassAccumulator.bleedFrameCount += 1;
+  if (frame.bleedString) {
+    practicePatternPassAccumulator.bleedStringCounts.set(
+      frame.bleedString,
+      (practicePatternPassAccumulator.bleedStringCounts.get(frame.bleedString) ?? 0) + 1,
+    );
+  }
+}
+
+function capturePracticePatternTempoFrame(frame: TempoFrame): void {
+  if (!practicePatternPlaying || state.mode !== "practice" || frame.tMs < practicePatternStartedAtMs) {
+    return;
+  }
+  if (
+    frame.status !== "play-faster" &&
+    frame.status !== "play-slower" &&
+    frame.status !== "on-tempo"
+  ) {
+    return;
+  }
+  practicePatternPassAccumulator.tempoCounts[frame.status] += 1;
+  practicePatternPassAccumulator.tempoSamples += 1;
+}
+
+function summarizePracticePassTempo(
+  accumulator: PracticePatternPassAccumulator,
+): TempoFrame["status"] {
+  const faster = accumulator.tempoCounts["play-faster"];
+  const slower = accumulator.tempoCounts["play-slower"];
+  const onTempo = accumulator.tempoCounts["on-tempo"];
+  const total = faster + slower + onTempo;
+  if (total < 4) {
+    return "insufficient";
+  }
+  if (faster >= total * 0.6 && faster > slower) {
+    return "play-faster";
+  }
+  if (slower >= total * 0.6 && slower > faster) {
+    return "play-slower";
+  }
+  return "on-tempo";
+}
+
+function practicePassTempoLabel(status: TempoFrame["status"]): string {
+  switch (status) {
+    case "play-faster":
+      return "Overall: play faster";
+    case "play-slower":
+      return "Overall: play slower";
+    case "on-tempo":
+      return "Overall: aim for the metronome";
+    case "insufficient":
+      return "Overall: not enough timing data";
+    case "idle":
+    default:
+      return "Overall: start playing";
+  }
+}
+
+function mostCommonBleedString(counts: Map<string, number>): string | null {
+  let bestString: string | null = null;
+  let bestCount = 0;
+  for (const [stringName, count] of counts.entries()) {
+    if (count > bestCount) {
+      bestString = stringName;
+      bestCount = count;
+    }
+  }
+  return bestString;
+}
+
 function practicePatternTraversalOrder(pattern = selectedPracticePattern()): number[] {
   const forward = pattern.notes.map((_, index) => index);
   if (
@@ -1494,25 +1690,19 @@ function practicePatternCycleIndexForNow(): number {
 }
 
 function practicePatternReadoutText(): string {
-  const correct = practicePatternResults.filter((result) => result.status === "correct").length;
-  const wrong = practicePatternResults.filter((result) => result.status === "wrong").length;
   const pattern = selectedPracticePattern();
   const countInRemaining = practicePatternCountInRemainingBeats(performance.now());
-  const countIn =
-    countInRemaining !== null
-      ? ` | count-in ${countInRemaining}`
-      : !practicePatternPlaying && practicePatternCountInBeats > 0
-        ? ` | count-in ${practicePatternCountInBeats} beats`
-        : "";
-  const active =
-    practicePatternActiveIndex === null
-      ? ""
-      : ` | note ${practicePatternActiveIndex + 1}/${pattern.notes.length}`;
-  const score = correct > 0 || wrong > 0 ? ` | ${correct} correct, ${wrong} wrong` : "";
-  const loop = practicePatternLoopEnabled
-    ? ` | loop ${practicePatternLoopMode === "back-and-forth" ? "back + forth" : "restart"}`
-    : "";
-  return `${practicePatternLabels(pattern)}${countIn}${active}${score}${loop}`;
+  if (countInRemaining !== null) {
+    return `Count-in ${countInRemaining}`;
+  }
+  if (practicePatternActiveIndex !== null) {
+    const direction = practicePatternPassDirection(practicePatternCycleIndex);
+    return `${direction === "backward" ? "Backward" : "Forward"} round, note ${practicePatternActiveIndex + 1} of ${pattern.notes.length}`;
+  }
+  if (!practicePatternPlaying && practicePatternPassSummary) {
+    return `${practicePatternPassSummary.direction === "backward" ? "Backward" : "Forward"} round complete`;
+  }
+  return `${pattern.notes.length} notes ready`;
 }
 
 function practicePatternCountInRemainingBeats(nowMs: number): number | null {
@@ -1557,6 +1747,8 @@ function renderPracticePanel(): void {
   );
   ui.practicePatternPlayBtn.classList.toggle("playing", practicePatternPlaying);
   ui.practicePatternReadout.textContent = practicePatternReadoutText();
+  ui.practiceOverallFeedback.className = `practice-overall-feedback ${practicePatternPassSummary ? `status-${practicePatternPassSummary.tempoStatus}` : "status-idle"}`;
+  ui.practiceOverallFeedback.textContent = practicePatternOverallFeedbackText();
 
   const estimatedText =
     practice.estimatedBpm === null ? "-" : `${Math.round(practice.estimatedBpm)} BPM`;
@@ -1569,6 +1761,22 @@ function renderPracticePanel(): void {
   ui.practiceDetail.textContent =
     `Correction ${practiceCorrectionSource} | Tolerance ±${practiceTolerancePct}% | Confidence ${(practice.confidence * 100).toFixed(0)}% | rhythmic signal ${(practice.novelty * 100).toFixed(0)}%`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
+}
+
+function practicePatternOverallFeedbackText(): string {
+  const summary = practicePatternPassSummary;
+  if (!summary) {
+    return practicePatternPlaying
+      ? "Finish the current round to get pattern feedback."
+      : "Play a full round to get pattern feedback.";
+  }
+
+  const direction = summary.direction === "backward" ? "Backward" : "Forward";
+  const notesText = `${summary.correct}/${summary.total} notes`;
+  const bleedText = summary.bleedDetected
+    ? `Bleeding detected${summary.bleedString ? ` on ${summary.bleedString}` : ""} (${Math.round(summary.bleedFrameRatio * 100)}% of frames).`
+    : "No string bleed detected.";
+  return `${direction}: ${summary.tempoLabel}. ${notesText} correct. ${bleedText}`;
 }
 
 function renderPracticeDebug(): string {
@@ -1700,7 +1908,7 @@ function practiceStatusLabel(status: TempoFrame["status"], listening: boolean): 
 }
 
 function isStringPurityActive(): boolean {
-  return enableStringPurityCheck || state.mode === "spectrum";
+  return enableStringPurityCheck || state.mode === "practice" || state.mode === "spectrum";
 }
 
 function syncStringPurityPipeline(): void {
@@ -2284,6 +2492,7 @@ function onTempoFrame(frame: TempoFrame): void {
   };
 
   if (state.mode === "practice") {
+    capturePracticePatternTempoFrame(frame);
     scheduleRender();
   }
 }
@@ -2735,43 +2944,93 @@ function renderStaffPracticePattern(nowMs: number): string {
   const pattern = selectedPracticePattern();
   practicePatternActiveIndex = activeIndex;
 
-  const slots = pattern.notes.map((note, index) => {
-    const result = practicePatternResults[index] ?? { status: "pending", playedMidi: null };
-    const y = midiToStaffY(note.midi);
-    const ledgers = ledgerLineYs(note.midi)
-      .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
-      .join("");
-    const stemDirection = stemDirectionForMidi(note.midi);
-    const statusClass = `status-${result.status}`;
-    const activeClass = activeIndex === index ? "active" : "";
-    const playedNoteHtml =
-      result.status === "wrong" && result.playedMidi !== null
-        ? renderPracticePlayedNote(result.playedMidi)
-        : "";
-    const playedLabel =
-      result.playedMidi === null
-        ? "&nbsp;"
-        : `${midiToSolfege(result.playedMidi)} ${midiToScientific(result.playedMidi)}`;
+  const rowCount = Math.max(1, Math.ceil(pattern.notes.length / PRACTICE_PATTERN_NOTES_PER_ROW));
+  const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const startIndex = rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW;
+    const notes = pattern.notes.slice(startIndex, startIndex + PRACTICE_PATTERN_NOTES_PER_ROW);
+    const slots = notes.map((note, localIndex) => {
+      const index = startIndex + localIndex;
+      const result = practicePatternResults[index] ?? { status: "pending", playedMidi: null };
+      const y = midiToStaffY(note.midi);
+      const ledgers = ledgerLineYs(note.midi)
+        .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+        .join("");
+      const stemDirection = stemDirectionForMidi(note.midi);
+      const statusClass = `status-${result.status}`;
+      const activeClass = activeIndex === index ? "active active-slot" : "";
+      const playedNoteHtml =
+        result.status === "wrong" && result.playedMidi !== null
+          ? renderPracticePlayedNote(result.playedMidi)
+          : "";
+      const playedLabel =
+        result.playedMidi === null
+          ? "&nbsp;"
+          : `${midiToSolfege(result.playedMidi)} ${midiToScientific(result.playedMidi)}`;
+
+      return `
+        <div class="practice-pattern-slot ${activeClass}" data-row-index="${rowIndex}">
+          ${ledgers}
+          <div class="staff-batch-note value-quarter practice-pattern-note ${statusClass} ${activeIndex === index ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
+            <div class="staff-batch-note-head"></div>
+            <div class="staff-batch-note-stem"></div>
+          </div>
+          ${playedNoteHtml}
+          <div class="practice-pattern-target">${note.label}</div>
+          <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
+        </div>
+      `;
+    }).join("");
+
+    const placeholders = Array.from(
+      { length: PRACTICE_PATTERN_NOTES_PER_ROW - notes.length },
+      () => `<div class="practice-pattern-slot placeholder"></div>`,
+    ).join("");
 
     return `
-      <div class="practice-pattern-slot">
-        ${ledgers}
-        <div class="staff-batch-note value-quarter practice-pattern-note ${statusClass} ${activeClass} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
-          <div class="staff-batch-note-head"></div>
-          <div class="staff-batch-note-stem"></div>
+      <div class="practice-sheet-row" data-row-index="${rowIndex}">
+        <div class="practice-sheet-lines">
+          <div class="staff-line l1"></div>
+          <div class="staff-line l2"></div>
+          <div class="staff-line l3"></div>
+          <div class="staff-line l4"></div>
+          <div class="staff-line l5"></div>
         </div>
-        ${playedNoteHtml}
-        <div class="practice-pattern-target">${note.label}</div>
-        <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
+        <div class="practice-pattern-grid" style="--pattern-cols:${PRACTICE_PATTERN_NOTES_PER_ROW}">
+          ${slots}${placeholders}
+        </div>
       </div>
     `;
   }).join("");
 
   return `
-    <div class="practice-pattern-grid" style="--pattern-cols:${pattern.notes.length}">
-      ${slots}
+    <div class="practice-sheet" style="--practice-row-count:${rowCount}">
+      ${rows}
     </div>
   `;
+}
+
+function scrollPracticeSheetToActiveRow(): void {
+  if (!ui || state.mode !== "practice") {
+    return;
+  }
+  const activeSlot = ui.staff.querySelector<HTMLElement>(".practice-pattern-slot.active-slot");
+  if (!activeSlot) {
+    practicePatternLastScrolledRow = -1;
+    return;
+  }
+  const rowIndex = parseInt(activeSlot.dataset.rowIndex ?? "-1", 10);
+  if (!Number.isFinite(rowIndex) || rowIndex === practicePatternLastScrolledRow) {
+    return;
+  }
+  practicePatternLastScrolledRow = rowIndex;
+  const row = ui.staff.querySelector<HTMLElement>(`.practice-sheet-row[data-row-index="${rowIndex}"]`);
+  if (!row) {
+    return;
+  }
+  ui.staff.scrollTo({
+    top: Math.max(0, row.offsetTop - 12),
+    behavior: "smooth",
+  });
 }
 
 function renderPracticePlayedNote(midi: number): string {
