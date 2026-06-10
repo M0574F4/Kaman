@@ -369,7 +369,17 @@ function mountUi(): void {
             <canvas id="spectrogram-canvas" class="spectrogram-canvas"></canvas>
             <div id="spectrogram-overlay" class="spectrogram-overlay"></div>
           </div>
-          <div class="staff-metronome-dock">
+          <div class="practice-sheet-statusbar">
+            <div class="practice-feedback-grid">
+              <div class="practice-feedback-card instant">
+                <span>Now</span>
+                <div id="practice-status" class="practice-status status-idle">-</div>
+              </div>
+              <div class="practice-feedback-card overall">
+                <span>Round</span>
+                <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
+              </div>
+            </div>
             <div id="metronome-box" class="metronome-box"></div>
           </div>
         </section>
@@ -386,18 +396,9 @@ function mountUi(): void {
                 </span>
               </span>
             </label>
+            <p id="practice-estimate" class="practice-estimate">80 target · -</p>
           </div>
           <div id="practice-panel" class="practice-panel">
-            <div class="practice-feedback-grid">
-              <div class="practice-feedback-card instant">
-                <span>Now</span>
-                <div id="practice-status" class="practice-status status-idle">-</div>
-              </div>
-              <div class="practice-feedback-card overall">
-                <span>Round</span>
-                <div id="practice-overall-feedback" class="practice-overall-feedback">After first pass</div>
-              </div>
-            </div>
             <div class="practice-pattern-controls">
               <select id="practice-pattern-select" class="practice-pattern-select" aria-label="Practice pattern">
                 ${PRACTICE_PATTERNS.map(
@@ -420,7 +421,6 @@ function mountUi(): void {
                 <span id="practice-pattern-readout">Ready</span>
               </div>
             </div>
-            <p id="practice-estimate" class="practice-estimate">Target 80 BPM | estimated -</p>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
             <div class="practice-minimal-controls">
               <label>Tolerance %
@@ -1767,12 +1767,20 @@ function practicePatternOverallFeedbackText(): string {
       : "After first pass";
   }
 
-  const direction = summary.direction === "backward" ? "Backward" : "Forward";
+  const direction = summary.direction === "backward" ? "Back" : "Fwd";
+  const tempoText =
+    summary.tempoStatus === "play-faster"
+      ? "faster"
+      : summary.tempoStatus === "play-slower"
+        ? "slower"
+        : summary.tempoStatus === "on-tempo"
+          ? "tempo"
+          : "timing?";
   const notesText = `${summary.correct}/${summary.total}`;
   const bleedText = summary.bleedDetected
-    ? ` · bleed${summary.bleedString ? ` ${summary.bleedString}` : ""} ${Math.round(summary.bleedFrameRatio * 100)}%`
+    ? ` · bleed ${Math.round(summary.bleedFrameRatio * 100)}%`
     : "";
-  return `${direction}: ${summary.tempoLabel.replace("Overall: ", "")} · ${notesText}${bleedText}`;
+  return `${direction} · ${tempoText} · ${notesText}${bleedText}`;
 }
 
 function renderPracticeDebug(): string {
@@ -2068,8 +2076,11 @@ function renderVisualMetronome(nowMs: number): string {
     countInRemaining !== null
       ? `<div class="metro-countdown" aria-label="Count-in ${countInRemaining}">${countInRemaining}</div>`
       : "";
+  const labelHtml = state.mode === "practice" && countInRemaining === null
+    ? ""
+    : `<div class="metro-label">${label}</div>`;
 
-  return `${countInHtml}<div class="metro-row">${pulseHtml}</div><div class="metro-label">${label}</div>`;
+  return `${countInHtml}<div class="metro-row">${pulseHtml}</div>${labelHtml}`;
 }
 
 function syncMetronomeAnimationLoop(): void {
@@ -3032,12 +3043,8 @@ function scrollPracticeSheetToActiveRow(): void {
 function renderPracticePlayedNote(midi: number): string {
   const y = midiToStaffY(midi);
   const stemDirection = stemDirectionForMidi(midi);
-  const ledgers = ledgerLineYs(midi)
-    .map((lineY) => `<div class="practice-pattern-ledger-line played" style="top:${lineY.toFixed(1)}px"></div>`)
-    .join("");
 
   return `
-    ${ledgers}
     <div class="staff-batch-note value-quarter practice-pattern-played-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="Played ${midiToScientific(midi)}">
       <div class="staff-batch-note-head"></div>
       <div class="staff-batch-note-stem"></div>

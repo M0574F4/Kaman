@@ -192,15 +192,18 @@ button.primary {
   background: #fffdf8;
 }
 
-.staff-metronome-dock {
+.practice-sheet-statusbar {
   display: flex;
   justify-content: flex-end;
+  align-items: stretch;
+  gap: 0.55rem;
   margin-top: 0.35rem;
 }
 
-.staff-metronome-dock .metronome-box {
+.practice-sheet-statusbar .metronome-box {
   margin: 0;
-  min-width: 210px;
+  min-width: 0;
+  flex: 0 0 auto;
 }
 
 .beat-batch-box {
@@ -414,6 +417,10 @@ button.primary {
   align-items: stretch;
 }
 
+.practice-sheet-statusbar .practice-feedback-grid {
+  flex: 1 1 auto;
+}
+
 .practice-feedback-card {
   min-width: 0;
   padding: 0.38rem;
@@ -555,7 +562,7 @@ button.primary {
 
 .practice-estimate,
 .practice-detail {
-  margin: 0.32rem 0 0;
+  margin: 0;
   font-size: 0.84rem;
   color: #3f4d49;
 }
@@ -814,8 +821,8 @@ button.primary {
 }
 
 .staff.practice-sheet-active {
-  height: min(54dvh, 430px);
-  min-height: 250px;
+  height: min(54dvh, 460px);
+  min-height: 280px;
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
@@ -997,7 +1004,7 @@ button.primary {
 
 .practice-sheet-row {
   position: relative;
-  min-height: 230px;
+  min-height: 260px;
   border: 1px solid rgba(120, 101, 75, 0.16);
   border-radius: 8px;
   background: #fffef9;
@@ -1150,17 +1157,19 @@ button.primary {
 }
 
 .practice-pattern-target {
-  bottom: 34px;
+  bottom: 16px;
   color: #1f2f2a;
   font-size: 0.7rem;
   font-weight: 700;
+  opacity: 0.8;
 }
 
 .practice-pattern-played {
-  bottom: 12px;
+  bottom: 2px;
   padding: 0 1px;
   color: #9a9184;
   font-size: 0.54rem;
+  opacity: 0.8;
 }
 
 .practice-pattern-played.status-correct {
@@ -1399,6 +1408,27 @@ pre {
 #app[data-mode="practice"] #sequence-meta,
 #app[data-mode="practice"] #sequence-summary {
   display: none;
+}
+
+#app:not([data-mode="practice"]) .practice-sheet-statusbar .practice-feedback-grid,
+#app:not([data-mode="practice"]) #practice-estimate {
+  display: none;
+}
+
+#app[data-mode="practice"] .live-metro-controls {
+  display: flex !important;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+#app[data-mode="practice"] .live-metro-controls label {
+  flex: 0 0 auto;
+}
+
+#app[data-mode="practice"] #practice-estimate {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 @media (max-width: 720px) {
