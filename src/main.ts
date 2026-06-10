@@ -91,7 +91,7 @@ type BeatBatch = {
 
 type PracticePatternNote = {
   midi: number;
-  label: "Re" | "La";
+  label: string;
 };
 
 type PracticePattern = {
@@ -159,6 +159,8 @@ type SheetEntrySlot = {
   midi: number;
 };
 
+const PATTERN_ENTRY_ID = "pattern-entry";
+
 const PRACTICE_PATTERNS: PracticePattern[] = [
   {
     id: "warmup1",
@@ -195,6 +197,19 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
       ...makeWarmupGroup(62, "Re", 2),
       ...makeWarmupGroup(57, "La", 2),
     ],
+  },
+  {
+    id: PATTERN_ENTRY_ID,
+    name: "Pattern Entry",
+    defaultLoop: true,
+    defaultLoopMode: "restart",
+    defaultCountInBeats: 4,
+    tempoRamp: {
+      initialBpm: 40,
+      stepBpm: 0,
+      maxBpm: 140,
+    },
+    notes: [],
   },
 ];
 
@@ -247,6 +262,12 @@ let practicePatternActiveIndex: number | null = null;
 let practicePatternCycleIndex = 0;
 let practicePatternLastScrolledRow = -1;
 let practicePatternStopTimer: number | null = null;
+let sheetEntryTool: SheetEntryTool = "natural";
+let sheetEntryTimeSignature: typeof sequenceSettings.timeSignature = "4/4";
+let sheetEntrySlotValue: SheetEntrySlotValue = "eighth";
+let sheetEntryBars = 1;
+let sheetEntrySlotCount = defaultSheetSlotCount(sheetEntryTimeSignature, sheetEntrySlotValue, sheetEntryBars);
+let sheetEntrySlots: Array<SheetEntrySlot | null> = createEmptySheetSlots(sheetEntrySlotCount);
 let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
 let practicePatternPassSummary: PracticePatternPassSummary | null = null;
 let practicePatternPassAccumulator = createPracticePatternPassAccumulator();
@@ -254,12 +275,6 @@ sequenceSettings.bpm = practicePatternTempoRamp.initialBpm;
 state.practice.targetBpm = sequenceSettings.bpm;
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
-let sheetEntryTool: SheetEntryTool = "natural";
-let sheetEntryTimeSignature: typeof sequenceSettings.timeSignature = "4/4";
-let sheetEntrySlotValue: SheetEntrySlotValue = "eighth";
-let sheetEntryBars = 1;
-let sheetEntrySlotCount = defaultSheetSlotCount(sheetEntryTimeSignature, sheetEntrySlotValue, sheetEntryBars);
-let sheetEntrySlots: Array<SheetEntrySlot | null> = createEmptySheetSlots(sheetEntrySlotCount);
 let beatToleranceMs = 80;
 let beatAttemptId = 1;
 const beatAttempts: BeatDrillAttempt[] = [];
@@ -370,7 +385,10 @@ let ui: UiRefs | null = null;
 function mountUi(): void {
   appRoot.innerHTML = `
     <main class="panel">
-      <h1>Practice</h1>
+      <h1 class="brand-wordmark" aria-label="Kaman">
+        <span class="brand-note" aria-hidden="true"></span>
+        <span>Kaman</span>
+      </h1>
       <div class="controls">
         <button id="listen-btn" class="primary">Start Listening</button>
         <select id="mode-select" aria-label="Mode">
@@ -914,6 +932,7 @@ function mountUi(): void {
     const target = event.target as HTMLSelectElement;
     sheetEntryTimeSignature = asTimeSignature(target.value);
     syncSheetEntryTiming();
+    syncPatternEntryPracticeResults();
     scheduleRender();
   });
 
@@ -921,6 +940,7 @@ function mountUi(): void {
     const target = event.target as HTMLSelectElement;
     sheetEntrySlotValue = asSheetEntrySlotValue(target.value);
     syncSheetEntryTiming();
+    syncPatternEntryPracticeResults();
     scheduleRender();
   });
 
@@ -929,6 +949,7 @@ function mountUi(): void {
     sheetEntryBars = clamp(parseInt(target.value || "1", 10), 1, 4);
     target.value = String(sheetEntryBars);
     syncSheetEntryTiming();
+    syncPatternEntryPracticeResults();
     scheduleRender();
   });
 
@@ -939,7 +960,9 @@ function mountUi(): void {
   });
 
   noteEntryClearBtn.addEventListener("click", () => {
+    stopPracticePatternPlayback(true);
     sheetEntrySlots = createEmptySheetSlots(sheetEntrySlotCount);
+    syncPatternEntryPracticeResults();
     scheduleRender();
   });
 
@@ -1222,7 +1245,9 @@ function render(): void {
   ui.liveMetronomeControls.style.display = state.mode === "practice" ? "grid" : "none";
   ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
-  ui.noteEntryControls.style.display = state.mode === "sheet-entry" ? "grid" : "none";
+  const patternEntryPracticeActive = state.mode === "practice" && isPatternEntrySelected();
+  ui.noteEntryControls.style.display =
+    state.mode === "sheet-entry" || patternEntryPracticeActive ? "grid" : "none";
   ui.outputTitle.style.display = state.mode === "practice" ? "none" : "";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
@@ -1296,8 +1321,14 @@ function render(): void {
   ui.stringPurityToggle.disabled = state.mode === "spectrum";
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
-  ui.staff.classList.toggle("sheet-entry-active", state.mode === "sheet-entry");
-  ui.staff.classList.toggle("practice-sheet-active", state.mode === "practice");
+  ui.staff.classList.toggle(
+    "sheet-entry-active",
+    state.mode === "sheet-entry" || patternEntryPracticeActive,
+  );
+  ui.staff.classList.toggle(
+    "practice-sheet-active",
+    state.mode === "practice" || state.mode === "sheet-entry",
+  );
   syncMetronomeAnimationLoop();
 
   const centsText = state.live.cents === null ? "" : ` (${formatSigned(state.live.cents)} cents)`;
@@ -1344,7 +1375,9 @@ function render(): void {
     previousDisplayedSnapshot = null;
   } else if (practicePatternStaffActive) {
     ui.staffBatchLayer.style.display = "block";
-    ui.staffBatchLayer.innerHTML = renderStaffPracticePattern(nowMs);
+    ui.staffBatchLayer.innerHTML = isPatternEntrySelected()
+      ? renderStaffSheetEntry(true, nowMs)
+      : renderStaffPracticePattern(nowMs);
     scrollPracticeSheetToActiveRow();
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
@@ -1353,7 +1386,7 @@ function render(): void {
     previousDisplayedSnapshot = null;
   } else if (sheetEntryModeActive) {
     ui.staffBatchLayer.style.display = "block";
-    ui.staffBatchLayer.innerHTML = renderStaffSheetEntry();
+    ui.staffBatchLayer.innerHTML = renderStaffSheetEntry(false, nowMs);
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -1467,6 +1500,11 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   }
 
   const pattern = selectedPracticePattern();
+  if (pattern.notes.length === 0) {
+    practicePatternPassSummary = null;
+    scheduleRender();
+    return;
+  }
   applyPracticePatternInitialTempo(pattern);
   const startMs = performance.now();
 
@@ -2078,6 +2116,9 @@ function practicePatternCycleIndexForNow(): number {
 
 function practicePatternReadoutText(): string {
   const pattern = selectedPracticePattern();
+  if (isPatternEntrySelected() && pattern.notes.length === 0) {
+    return "Enter notes";
+  }
   const countInRemaining = practicePatternCountInRemainingBeats(performance.now());
   if (countInRemaining !== null) {
     return `Count-in ${countInRemaining}`;
@@ -3462,43 +3503,89 @@ function renderPracticePlayedNote(midi: number): string {
   `;
 }
 
-function renderStaffSheetEntry(): string {
+function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()): string {
   resizeSheetEntrySlots(sheetEntrySlotCount);
 
-  const slots = sheetEntrySlots.map((slot, index) => {
-    if (!slot) {
+  const activePatternIndex = practiceMode ? practicePatternCurrentIndex(nowMs) : null;
+  const patternIndexBySlot = sheetEntryPatternIndexBySlot();
+  const rowCount = Math.max(1, Math.ceil(sheetEntrySlotCount / PRACTICE_PATTERN_NOTES_PER_ROW));
+  const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const startIndex = rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW;
+    const rowSlots = sheetEntrySlots.slice(startIndex, startIndex + PRACTICE_PATTERN_NOTES_PER_ROW);
+    const slots = rowSlots.map((slot, localIndex) => {
+      const index = startIndex + localIndex;
+      const patternIndex = patternIndexBySlot.get(index) ?? null;
+      const result = patternIndex !== null ? practicePatternResults[patternIndex] : null;
+      const status = practiceMode && result ? result.status : "pending";
+      const activeClass = practiceMode && activePatternIndex !== null && patternIndex === activePatternIndex
+        ? "active active-slot"
+        : "";
+
+      if (!slot) {
+        return `
+          <div class="practice-pattern-slot sheet-entry-slot empty ${activeClass}" data-row-index="${rowIndex}" data-slot-index="${index}">
+            <div class="sheet-entry-slot-label">${index + 1}</div>
+          </div>
+        `;
+      }
+
+      const y = midiToStaffY(slot.naturalMidi);
+      const stemDirection = stemDirectionForMidi(slot.naturalMidi);
+      const ledgers = ledgerLineYs(slot.naturalMidi)
+        .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+        .join("");
+      const accidental = accidentalSymbol(slot.accidental);
+      const label = formatSheetEntrySlot(slot);
+      const statusClass = `status-${status}`;
+      const overlayMidi = result && result.status === "wrong" ? result.playedMidi : result?.bleedMidi ?? null;
+      const playedNoteHtml =
+        practiceMode && overlayMidi !== null
+          ? renderPracticePlayedNote(overlayMidi)
+          : "";
+      const playedLabel =
+        !practiceMode || overlayMidi === null
+          ? label
+          : `${midiToSolfege(overlayMidi)} ${midiToScientific(overlayMidi)}`;
+
       return `
-        <div class="sheet-entry-slot empty">
+        <div class="practice-pattern-slot sheet-entry-slot ${activeClass}" data-row-index="${rowIndex}" data-slot-index="${index}">
+          ${ledgers}
+          <div class="staff-batch-note value-quarter sheet-entry-note practice-pattern-note ${statusClass} ${practiceMode && patternIndex === activePatternIndex ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
+            ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
+            <div class="staff-batch-note-head"></div>
+            <div class="staff-batch-note-stem"></div>
+          </div>
+          ${playedNoteHtml}
           <div class="sheet-entry-slot-label">${index + 1}</div>
+          <div class="sheet-entry-note-label ${practiceMode ? statusClass : ""}">${playedLabel}</div>
         </div>
       `;
-    }
+    }).join("");
 
-    const y = midiToStaffY(slot.naturalMidi);
-    const stemDirection = stemDirectionForMidi(slot.naturalMidi);
-    const ledgers = ledgerLineYs(slot.naturalMidi)
-      .map((lineY) => `<div class="staff-batch-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
-      .join("");
-    const accidental = accidentalSymbol(slot.accidental);
-    const label = formatSheetEntrySlot(slot);
+    const placeholders = Array.from(
+      { length: PRACTICE_PATTERN_NOTES_PER_ROW - rowSlots.length },
+      () => `<div class="practice-pattern-slot sheet-entry-slot placeholder"></div>`,
+    ).join("");
 
     return `
-      <div class="sheet-entry-slot">
-        ${ledgers}
-        <div class="staff-batch-note value-quarter sheet-entry-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
-          ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
-          <div class="staff-batch-note-head"></div>
-          <div class="staff-batch-note-stem"></div>
+      <div class="practice-sheet-row" data-row-index="${rowIndex}">
+        <div class="practice-sheet-lines">
+          <div class="staff-line l1"></div>
+          <div class="staff-line l2"></div>
+          <div class="staff-line l3"></div>
+          <div class="staff-line l4"></div>
+          <div class="staff-line l5"></div>
         </div>
-        <div class="sheet-entry-slot-label">${index + 1}</div>
-        <div class="sheet-entry-note-label">${label}</div>
+        <div class="practice-pattern-grid sheet-entry-grid" style="--pattern-cols:${PRACTICE_PATTERN_NOTES_PER_ROW}">
+          ${slots}${placeholders}
+        </div>
       </div>
     `;
   }).join("");
 
   return `
-    <div class="sheet-entry-grid" style="--sheet-cols:${Math.max(1, sheetEntrySlotCount)}">
-      ${slots}
+    <div class="practice-sheet sheet-entry-sheet" style="--practice-row-count:${rowCount}">
+      ${rows}
     </div>
   `;
 }
@@ -3532,19 +3619,31 @@ function renderSheetEntrySummary(): string {
 }
 
 function handleStaffSheetEntryClick(event: MouseEvent): void {
-  if (!ui || state.mode !== "sheet-entry") {
+  if (!ui || !isSheetEntryEditable()) {
     return;
   }
 
-  const rect = ui.staff.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) {
+  if (state.mode === "practice") {
+    stopPracticePatternPlayback(true);
+  }
+
+  const row = sheetEntryRowForClientY(event.clientY);
+  const rect = row?.getBoundingClientRect() ?? ui.staff.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || !row) {
     return;
   }
 
   const x = clamp(event.clientX - rect.left, 0, rect.width - 0.001);
-  const slotIndex = clamp(Math.floor((x / rect.width) * sheetEntrySlotCount), 0, sheetEntrySlotCount - 1);
+  const rowIndex = parseInt(row.dataset.rowIndex ?? "0", 10);
+  const localIndex = Math.floor((x / rect.width) * PRACTICE_PATTERN_NOTES_PER_ROW);
+  const slotIndex = clamp(
+    rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW + localIndex,
+    0,
+    sheetEntrySlotCount - 1,
+  );
   if (sheetEntryTool === "rest") {
     sheetEntrySlots[slotIndex] = null;
+    syncPatternEntryPracticeResults();
     scheduleRender();
     return;
   }
@@ -3557,7 +3656,26 @@ function handleStaffSheetEntryClick(event: MouseEvent): void {
     accidental: sheetEntryTool,
     midi: clamp(midi, 0, 127),
   };
+  syncPatternEntryPracticeResults();
   scheduleRender();
+}
+
+function sheetEntryRowForClientY(clientY: number): HTMLElement | null {
+  if (!ui) {
+    return null;
+  }
+  const rows = Array.from(ui.staff.querySelectorAll<HTMLElement>(".practice-sheet-row"));
+  if (rows.length === 0) {
+    return null;
+  }
+  return rows.find((row) => {
+    const rect = row.getBoundingClientRect();
+    return clientY >= rect.top && clientY <= rect.bottom;
+  }) ?? rows[rows.length - 1] ?? null;
+}
+
+function isSheetEntryEditable(): boolean {
+  return state.mode === "sheet-entry" || (state.mode === "practice" && isPatternEntrySelected());
 }
 
 function resizeSheetEntrySlots(nextCount: number): void {
@@ -3642,6 +3760,41 @@ function accidentalSymbol(accidental: SheetEntryAccidental): string {
 function formatSheetEntrySlot(slot: SheetEntrySlot): string {
   const base = naturalMidiNameParts(slot.naturalMidi);
   return `${base.letter}${accidentalSymbol(slot.accidental)}${base.octave}`;
+}
+
+function sheetEntryPatternNotes(): PracticePatternNote[] {
+  return sheetEntrySlots
+    .filter((slot): slot is SheetEntrySlot => slot !== null)
+    .map((slot) => ({
+      midi: slot.midi,
+      label: midiToSolfege(slot.midi),
+    }));
+}
+
+function sheetEntryPatternIndexBySlot(): Map<number, number> {
+  const map = new Map<number, number>();
+  let patternIndex = 0;
+  sheetEntrySlots.forEach((slot, slotIndex) => {
+    if (!slot) {
+      return;
+    }
+    map.set(slotIndex, patternIndex);
+    patternIndex += 1;
+  });
+  return map;
+}
+
+function syncPatternEntryPracticeResults(): void {
+  if (!isPatternEntrySelected()) {
+    return;
+  }
+  practicePatternResults = createPracticePatternResults();
+  practicePatternPassSummary = null;
+  practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+}
+
+function isPatternEntrySelected(): boolean {
+  return selectedPracticePatternId === PATTERN_ENTRY_ID;
 }
 
 function staffYToNearestNaturalMidi(y: number): number {
@@ -4028,7 +4181,14 @@ function practicePatternById(id: string): PracticePattern {
 }
 
 function selectedPracticePattern(): PracticePattern {
-  return practicePatternById(selectedPracticePatternId);
+  const pattern = practicePatternById(selectedPracticePatternId);
+  if (pattern.id !== PATTERN_ENTRY_ID) {
+    return pattern;
+  }
+  return {
+    ...pattern,
+    notes: sheetEntryPatternNotes(),
+  };
 }
 
 function createPracticePatternResults(): PracticePatternResult[] {

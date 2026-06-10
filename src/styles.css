@@ -45,6 +45,54 @@ h1 {
   font-size: clamp(1.2rem, 2.4vw, 1.55rem);
 }
 
+.brand-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  color: #16392b;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: clamp(1.7rem, 3.8vw, 2.45rem);
+  font-style: italic;
+  font-weight: 700;
+  line-height: 0.95;
+}
+
+.brand-wordmark span:last-child {
+  transform: translateY(-0.02em);
+}
+
+.brand-note {
+  position: relative;
+  width: 1.05em;
+  height: 1.25em;
+  flex: 0 0 auto;
+}
+
+.brand-note::before {
+  content: "";
+  position: absolute;
+  left: 0.12em;
+  bottom: 0.04em;
+  width: 0.44em;
+  height: 0.32em;
+  border-radius: 55% 45% 58% 42%;
+  background: #1b4332;
+  transform: rotate(-18deg);
+}
+
+.brand-note::after {
+  content: "";
+  position: absolute;
+  left: 0.44em;
+  bottom: 0.18em;
+  width: 0.46em;
+  height: 1.02em;
+  border-top: 0.08em solid #1b4332;
+  border-right: 0.08em solid #1b4332;
+  border-radius: 0 80% 0 0;
+  transform: skewX(-12deg);
+}
+
 h2 {
   margin-top: 0;
 }
@@ -1045,6 +1093,7 @@ button.primary {
   position: relative;
   inset: auto;
   min-height: 100%;
+  pointer-events: auto;
 }
 
 .staff-batch-grid {
@@ -1097,14 +1146,6 @@ button.primary {
 .practice-sheet-row .practice-pattern-grid {
   position: absolute;
   inset: 0;
-}
-
-.sheet-entry-grid {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: grid;
-  grid-template-columns: repeat(var(--sheet-cols, 8), minmax(0, 1fr));
 }
 
 .sheet-entry-slot {
@@ -1173,6 +1214,14 @@ button.primary {
   color: #1f2f2a;
   font-size: 0.66rem;
   font-weight: 700;
+}
+
+.sheet-entry-note-label.status-wrong {
+  color: #b00020;
+}
+
+.sheet-entry-note-label.status-correct {
+  color: #1b7f4a;
 }
 
 .practice-pattern-slot {
