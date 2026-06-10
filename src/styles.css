@@ -305,6 +305,34 @@ button.primary {
   padding: 0.4rem 0.5rem;
 }
 
+.note-entry-controls {
+  display: none;
+  grid-template-columns: minmax(5.8rem, 0.7fr) minmax(8rem, 1fr) auto;
+  gap: 0.5rem;
+  align-items: end;
+  margin: -0.1rem 0 0.6rem;
+}
+
+.note-entry-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  color: #4f5d5e;
+}
+
+.note-entry-controls input,
+.note-entry-controls select {
+  min-width: 0;
+  font-size: 0.9rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.note-entry-controls button {
+  height: 2.25rem;
+  border-radius: 8px;
+}
+
 .live-bpm-stepper {
   display: inline-flex;
   align-items: stretch;
@@ -696,11 +724,15 @@ button.primary {
 .staff {
   margin: 0.45rem 0 0;
   position: relative;
-  height: 252px;
+  height: 312px;
   border-left: 2px solid #a6906f;
   border-right: 2px solid #a6906f;
   background: #fffef9;
   overflow: hidden;
+}
+
+.staff.sheet-entry-active {
+  cursor: crosshair;
 }
 
 .spectrum-panel {
@@ -854,6 +886,82 @@ button.primary {
   grid-template-columns: repeat(var(--pattern-cols, 16), minmax(0, 1fr));
 }
 
+.sheet-entry-grid {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(var(--sheet-cols, 8), minmax(0, 1fr));
+}
+
+.sheet-entry-slot {
+  position: relative;
+  min-width: 0;
+  border-right: 1px dashed rgba(120, 101, 75, 0.25);
+  background: linear-gradient(180deg, rgba(45, 106, 79, 0.035), transparent 42%);
+}
+
+.sheet-entry-slot:nth-child(2n) {
+  background: linear-gradient(180deg, rgba(45, 106, 79, 0.06), transparent 42%);
+}
+
+.sheet-entry-slot:last-child {
+  border-right: none;
+}
+
+.sheet-entry-slot.empty::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 108px;
+  width: 0.34rem;
+  height: 0.34rem;
+  border-radius: 999px;
+  background: rgba(120, 101, 75, 0.18);
+  transform: translate(-50%, -50%);
+}
+
+.sheet-entry-note {
+  transform: translate(-50%, -50%);
+}
+
+.sheet-entry-accidental {
+  position: absolute;
+  left: -0.25rem;
+  top: 50%;
+  min-width: 0.8rem;
+  color: #1f2f2a;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: right;
+  transform: translate(-100%, -50%);
+}
+
+.sheet-entry-slot-label,
+.sheet-entry-note-label {
+  position: absolute;
+  left: 0.08rem;
+  right: 0.08rem;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.sheet-entry-slot-label {
+  top: 0.35rem;
+  color: #8a7a64;
+  font-size: 0.64rem;
+}
+
+.sheet-entry-note-label {
+  bottom: 0.4rem;
+  color: #1f2f2a;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
 .practice-pattern-slot {
   position: relative;
   min-width: 0;
@@ -905,14 +1013,14 @@ button.primary {
 }
 
 .practice-pattern-target {
-  bottom: 28px;
+  bottom: 34px;
   color: #1f2f2a;
   font-size: 0.7rem;
   font-weight: 700;
 }
 
 .practice-pattern-played {
-  bottom: 8px;
+  bottom: 12px;
   padding: 0 1px;
   color: #9a9184;
   font-size: 0.54rem;

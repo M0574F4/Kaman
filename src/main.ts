@@ -34,10 +34,12 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app root");
 const appRoot = app;
 
-type SequenceSubMode = "single-beat" | "phrase";
+type SequenceSubMode = "single-beat" | "phrase" | "sheet-entry";
 type BeatUnit = "half" | "quarter" | "eighth";
 type BeatStatus = "On Time" | "Short" | "Long";
 type BeatValue = "whole" | "half" | "quarter" | "eighth";
+type SheetEntryAccidental = "natural" | "sharp" | "flat";
+type SheetEntryTool = SheetEntryAccidental | "rest";
 
 type BeatSymbol = {
   kind: "note" | "rest";
@@ -103,6 +105,12 @@ type PracticePatternResult = {
   playedMidi: number | null;
 };
 
+type SheetEntrySlot = {
+  naturalMidi: number;
+  accidental: SheetEntryAccidental;
+  midi: number;
+};
+
 const PRACTICE_PATTERNS: PracticePattern[] = [
   {
     id: "warmup1",
@@ -114,6 +122,18 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
       ...makeWarmupGroup(69, "La"),
       ...makeWarmupGroup(62, "Re"),
       ...makeWarmupGroup(57, "La"),
+    ],
+  },
+  {
+    id: "warmup2",
+    name: "Warmup 2",
+    defaultLoop: true,
+    defaultCountInBeats: 4,
+    notes: [
+      ...makeWarmupGroup(74, "Re", 2),
+      ...makeWarmupGroup(69, "La", 2),
+      ...makeWarmupGroup(62, "Re", 2),
+      ...makeWarmupGroup(57, "La", 2),
     ],
   },
 ];
@@ -159,6 +179,9 @@ let practicePatternStopTimer: number | null = null;
 let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
 let sequenceSubMode: SequenceSubMode = "single-beat";
 let beatUnit: BeatUnit = defaultBeatUnitForTimeSignature(sequenceSettings.timeSignature);
+let sheetEntryTool: SheetEntryTool = "natural";
+let sheetEntrySlotCount = defaultSheetSlotCount(sequenceSettings.timeSignature);
+let sheetEntrySlots: Array<SheetEntrySlot | null> = createEmptySheetSlots(sheetEntrySlotCount);
 let beatToleranceMs = 80;
 let beatAttemptId = 1;
 const beatAttempts: BeatDrillAttempt[] = [];
@@ -218,6 +241,10 @@ type UiRefs = {
   practiceDebug: HTMLDivElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
+  noteEntryControls: HTMLDivElement;
+  noteEntrySlotsInput: HTMLInputElement;
+  noteEntryToolSelect: HTMLSelectElement;
+  noteEntryClearBtn: HTMLButtonElement;
   liveBpmInput: HTMLInputElement;
   liveBpmUpBtn: HTMLButtonElement;
   liveBpmDownBtn: HTMLButtonElement;
@@ -364,6 +391,7 @@ function mountUi(): void {
               <select id="sequence-submode-select">
                 <option value="single-beat">Single Beat Drill</option>
                 <option value="phrase">Phrase Capture</option>
+                <option value="sheet-entry">Sheet Note Entry</option>
               </select>
             </label>
             <label>BPM
@@ -388,6 +416,20 @@ function mountUi(): void {
             <label>Tolerance ms
               <input id="tolerance-input" type="number" min="20" max="300" step="5" value="80" />
             </label>
+          </div>
+          <div id="note-entry-controls" class="note-entry-controls">
+            <label>Slots
+              <input id="note-entry-slots" type="number" min="1" max="32" step="1" value="8" />
+            </label>
+            <label>Click tool
+              <select id="note-entry-tool">
+                <option value="natural" selected>Natural</option>
+                <option value="sharp">Sharp</option>
+                <option value="flat">Flat</option>
+                <option value="rest">Rest</option>
+              </select>
+            </label>
+            <button id="note-entry-clear" type="button">Clear</button>
           </div>
           <label class="toggle-row" for="exact-pitch-toggle">
             <input id="exact-pitch-toggle" type="checkbox" />
@@ -447,6 +489,10 @@ function mountUi(): void {
   const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
+  const noteEntryControls = appRoot.querySelector<HTMLDivElement>("#note-entry-controls");
+  const noteEntrySlotsInput = appRoot.querySelector<HTMLInputElement>("#note-entry-slots");
+  const noteEntryToolSelect = appRoot.querySelector<HTMLSelectElement>("#note-entry-tool");
+  const noteEntryClearBtn = appRoot.querySelector<HTMLButtonElement>("#note-entry-clear");
   const liveBpmInput = appRoot.querySelector<HTMLInputElement>("#live-bpm-input");
   const liveBpmUpBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-up");
   const liveBpmDownBtn = appRoot.querySelector<HTMLButtonElement>("#live-bpm-down");
@@ -503,6 +549,10 @@ function mountUi(): void {
     !practiceDebug ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
+    !noteEntryControls ||
+    !noteEntrySlotsInput ||
+    !noteEntryToolSelect ||
+    !noteEntryClearBtn ||
     !liveBpmInput ||
     !liveBpmUpBtn ||
     !liveBpmDownBtn ||
@@ -562,6 +612,10 @@ function mountUi(): void {
     practiceDebug,
     sequenceControls,
     sequenceSubmodeSelect,
+    noteEntryControls,
+    noteEntrySlotsInput,
+    noteEntryToolSelect,
+    noteEntryClearBtn,
     liveBpmInput,
     liveBpmUpBtn,
     liveBpmDownBtn,
@@ -628,7 +682,12 @@ function mountUi(): void {
 
   sequenceSubmodeSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
-    sequenceSubMode = target.value === "phrase" ? "phrase" : "single-beat";
+    sequenceSubMode =
+      target.value === "phrase"
+        ? "phrase"
+        : target.value === "sheet-entry"
+          ? "sheet-entry"
+          : "single-beat";
     state.recording = false;
     singleBeatWindow = null;
     if (singleBeatStopTimer !== null) {
@@ -645,6 +704,29 @@ function mountUi(): void {
     currentBeatBatch = null;
     fadingBeatBatches.length = 0;
     scheduleRender();
+  });
+
+  noteEntrySlotsInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    sheetEntrySlotCount = clamp(parseInt(target.value || "8", 10), 1, 32);
+    target.value = String(sheetEntrySlotCount);
+    resizeSheetEntrySlots(sheetEntrySlotCount);
+    scheduleRender();
+  });
+
+  noteEntryToolSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    sheetEntryTool = asSheetEntryTool(target.value);
+    scheduleRender();
+  });
+
+  noteEntryClearBtn.addEventListener("click", () => {
+    sheetEntrySlots = createEmptySheetSlots(sheetEntrySlotCount);
+    scheduleRender();
+  });
+
+  staff.addEventListener("click", (event) => {
+    handleStaffSheetEntryClick(event);
   });
 
   const applyBpmInput = (target: HTMLInputElement): void => {
@@ -874,12 +956,15 @@ function render(): void {
   ui.listenBtn.textContent = state.listening ? "Stop Listening" : "Start Listening";
   ui.listenBtn.style.display = state.mode === "sequence" ? "none" : "";
   ui.modeSelect.value = state.mode;
-  ui.recordBtn.disabled = state.mode !== "sequence";
-  ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
+  ui.recordBtn.disabled = state.mode !== "sequence" || sequenceSubMode === "sheet-entry";
+  ui.recordBtn.style.display =
+    state.mode === "sequence" && sequenceSubMode !== "sheet-entry" ? "" : "none";
   ui.liveMetronomeControls.style.display =
     state.mode === "live" || state.mode === "practice" ? "grid" : "none";
   ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
+  ui.noteEntryControls.style.display =
+    state.mode === "sequence" && sequenceSubMode === "sheet-entry" ? "grid" : "none";
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
@@ -890,6 +975,8 @@ function render(): void {
         : "Sequence Output";
   ui.recordBtn.textContent = captureButtonLabel();
   ui.sequenceSubmodeSelect.value = sequenceSubMode;
+  ui.noteEntrySlotsInput.value = String(sheetEntrySlotCount);
+  ui.noteEntryToolSelect.value = sheetEntryTool;
   const activeElement = document.activeElement;
   if (activeElement !== ui.liveBpmInput) {
     ui.liveBpmInput.value = String(sequenceSettings.bpm);
@@ -923,6 +1010,7 @@ function render(): void {
   ui.stringPurityToggle.disabled = state.mode === "spectrum";
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
+  ui.staff.classList.toggle("sheet-entry-active", state.mode === "sequence" && sequenceSubMode === "sheet-entry");
   syncMetronomeAnimationLoop();
 
   const centsText = state.live.cents === null ? "" : ` (${formatSigned(state.live.cents)} cents)`;
@@ -953,6 +1041,9 @@ function render(): void {
   } else if (state.mode === "spectrum") {
     ui.captureHint.textContent =
       "Spectrum Mode: rolling log-frequency spectrogram with solfege/Hz markers and bleed overlays.";
+  } else if (sequenceSubMode === "sheet-entry") {
+    ui.captureHint.textContent =
+      "Sheet Note Entry: click fixed staff slots to build a pitch sequence.";
   } else if (sequenceSubMode === "single-beat") {
     ui.captureHint.textContent =
       "Single Beat Drill: use Start/Stop Single Beat Drill only; mic starts/stops automatically.";
@@ -965,6 +1056,7 @@ function render(): void {
   }
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
+  const sheetEntryModeActive = state.mode === "sequence" && sequenceSubMode === "sheet-entry";
   const spectrumModeActive = state.mode === "spectrum";
   const practicePatternStaffActive = state.mode === "practice";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
@@ -985,6 +1077,14 @@ function render(): void {
   } else if (practicePatternStaffActive) {
     ui.staffBatchLayer.style.display = "block";
     ui.staffBatchLayer.innerHTML = renderStaffPracticePattern(nowMs);
+    ui.noteGroup.style.visibility = "hidden";
+    ui.ledgerLayer.innerHTML = "";
+    ui.trailLayer.innerHTML = "";
+    trailNotes.length = 0;
+    previousDisplayedSnapshot = null;
+  } else if (sheetEntryModeActive) {
+    ui.staffBatchLayer.style.display = "block";
+    ui.staffBatchLayer.innerHTML = renderStaffSheetEntry();
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -1032,6 +1132,12 @@ function render(): void {
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent = "Live spectrum | log frequency scale | fixed-do reference labels";
     ui.sequenceSummary.textContent = renderSpectrumSummary(lastFrame, minBleedScore);
+  } else if (state.mode === "sequence" && sequenceSubMode === "sheet-entry") {
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent =
+      `Sheet entry | ${sheetEntrySlotCount} fixed slots | ${sequenceSettings.timeSignature} | ASCII pitch names`;
+    ui.sequenceSummary.textContent = renderSheetEntrySummary();
   } else if (state.mode === "sequence" && sequenceSubMode === "single-beat") {
     const targetMs = barDurationMs(sequenceSettings.bpm, sequenceSettings.timeSignature);
     const beatsInBar = beatsPerBar(sequenceSettings.timeSignature);
@@ -1069,6 +1175,10 @@ function captureButtonLabel(): string {
 
   if (sequenceSubMode === "single-beat") {
     return state.recording ? "Stop Single Beat Drill" : "Start Single Beat Drill";
+  }
+
+  if (sequenceSubMode === "sheet-entry") {
+    return "Sheet Entry";
   }
 
   return state.recording ? "Stop Phrase Capture" : "Start Phrase Capture";
@@ -1829,6 +1939,7 @@ function onModeChange(event: Event): void {
 
 async function onToggleRecording(): Promise<void> {
   if (state.mode !== "sequence") return;
+  if (sequenceSubMode === "sheet-entry") return;
 
   if (!state.listening) {
     await onToggleListening();
@@ -2516,6 +2627,180 @@ function renderPracticePlayedNote(midi: number): string {
   `;
 }
 
+function renderStaffSheetEntry(): string {
+  resizeSheetEntrySlots(sheetEntrySlotCount);
+
+  const slots = sheetEntrySlots.map((slot, index) => {
+    if (!slot) {
+      return `
+        <div class="sheet-entry-slot empty">
+          <div class="sheet-entry-slot-label">${index + 1}</div>
+        </div>
+      `;
+    }
+
+    const y = midiToStaffY(slot.naturalMidi);
+    const stemDirection = stemDirectionForMidi(slot.naturalMidi);
+    const ledgers = ledgerLineYs(slot.naturalMidi)
+      .map((lineY) => `<div class="staff-batch-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+      .join("");
+    const accidental = accidentalSymbol(slot.accidental);
+    const label = formatSheetEntrySlot(slot);
+
+    return `
+      <div class="sheet-entry-slot">
+        ${ledgers}
+        <div class="staff-batch-note value-quarter sheet-entry-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
+          ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
+          <div class="staff-batch-note-head"></div>
+          <div class="staff-batch-note-stem"></div>
+        </div>
+        <div class="sheet-entry-slot-label">${index + 1}</div>
+        <div class="sheet-entry-note-label">${label}</div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="sheet-entry-grid" style="--sheet-cols:${Math.max(1, sheetEntrySlotCount)}">
+      ${slots}
+    </div>
+  `;
+}
+
+function renderSheetEntrySummary(): string {
+  const slotNames = sheetEntrySlots.map((slot) => (slot ? formatSheetEntrySlot(slot) : "rest"));
+  const noteNames = sheetEntrySlots
+    .filter((slot): slot is SheetEntrySlot => slot !== null)
+    .map(formatSheetEntrySlot);
+
+  if (noteNames.length === 0) {
+    return "No notes entered yet.";
+  }
+
+  const indexed = sheetEntrySlots
+    .map((slot, index) => `${index + 1}. ${slot ? formatSheetEntrySlot(slot) : "rest"}`)
+    .join("\n");
+
+  return [
+    "Fixed-slot sequence:",
+    slotNames.join(" "),
+    "",
+    "Notes only:",
+    noteNames.join(" "),
+    "",
+    "Indexed slots:",
+    indexed,
+  ].join("\n");
+}
+
+function handleStaffSheetEntryClick(event: MouseEvent): void {
+  if (!ui || state.mode !== "sequence" || sequenceSubMode !== "sheet-entry") {
+    return;
+  }
+
+  const rect = ui.staff.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return;
+  }
+
+  const x = clamp(event.clientX - rect.left, 0, rect.width - 0.001);
+  const slotIndex = clamp(Math.floor((x / rect.width) * sheetEntrySlotCount), 0, sheetEntrySlotCount - 1);
+  if (sheetEntryTool === "rest") {
+    sheetEntrySlots[slotIndex] = null;
+    scheduleRender();
+    return;
+  }
+
+  const y = clamp(event.clientY - rect.top, 0, rect.height);
+  const naturalMidi = staffYToNearestNaturalMidi(y);
+  const midi = naturalMidi + accidentalOffset(sheetEntryTool);
+  sheetEntrySlots[slotIndex] = {
+    naturalMidi,
+    accidental: sheetEntryTool,
+    midi: clamp(midi, 0, 127),
+  };
+  scheduleRender();
+}
+
+function resizeSheetEntrySlots(nextCount: number): void {
+  const normalizedCount = clamp(Math.round(nextCount), 1, 32);
+  if (sheetEntrySlots.length === normalizedCount) {
+    return;
+  }
+  const nextSlots = createEmptySheetSlots(normalizedCount);
+  for (let i = 0; i < Math.min(sheetEntrySlots.length, normalizedCount); i += 1) {
+    nextSlots[i] = sheetEntrySlots[i];
+  }
+  sheetEntrySlots = nextSlots;
+  sheetEntrySlotCount = normalizedCount;
+}
+
+function createEmptySheetSlots(count: number): Array<SheetEntrySlot | null> {
+  return Array.from({ length: clamp(Math.round(count), 1, 32) }, () => null);
+}
+
+function defaultSheetSlotCount(timeSignature: typeof sequenceSettings.timeSignature): number {
+  return beatsPerBar(timeSignature) * slotsPerBeatForTimeSignature(timeSignature);
+}
+
+function asSheetEntryTool(value: string): SheetEntryTool {
+  if (value === "sharp" || value === "flat" || value === "rest") {
+    return value;
+  }
+  return "natural";
+}
+
+function accidentalOffset(accidental: SheetEntryAccidental): number {
+  if (accidental === "sharp") return 1;
+  if (accidental === "flat") return -1;
+  return 0;
+}
+
+function accidentalSymbol(accidental: SheetEntryAccidental): string {
+  if (accidental === "sharp") return "#";
+  if (accidental === "flat") return "b";
+  return "";
+}
+
+function formatSheetEntrySlot(slot: SheetEntrySlot): string {
+  const base = naturalMidiNameParts(slot.naturalMidi);
+  return `${base.letter}${accidentalSymbol(slot.accidental)}${base.octave}`;
+}
+
+function staffYToNearestNaturalMidi(y: number): number {
+  const bottomLineY = 160;
+  const halfLineGap = 13;
+  const e4Step = 30;
+  const step = e4Step + Math.round((bottomLineY - y) / halfLineGap);
+  return diatonicStepToNaturalMidi(step);
+}
+
+function diatonicStepToNaturalMidi(step: number): number {
+  const octave = Math.floor(step / 7);
+  const letterStep = ((step % 7) + 7) % 7;
+  const pitchClass = [0, 2, 4, 5, 7, 9, 11][letterStep] ?? 0;
+  return (octave + 1) * 12 + pitchClass;
+}
+
+function naturalMidiNameParts(midi: number): { letter: string; octave: number } {
+  const pitchClass = ((midi % 12) + 12) % 12;
+  const octave = Math.floor(midi / 12) - 1;
+  const letterByPitchClass: Record<number, string> = {
+    0: "C",
+    2: "D",
+    4: "E",
+    5: "F",
+    7: "G",
+    9: "A",
+    11: "B",
+  };
+  return {
+    letter: letterByPitchClass[pitchClass] ?? "C",
+    octave,
+  };
+}
+
 function renderStaffBeatBatch(nowMs: number): string {
   const batch = currentBeatBatch;
   const beatCount = beatsPerBar(sequenceSettings.timeSignature);
@@ -2857,8 +3142,9 @@ function asBeatUnit(value: string): BeatUnit {
 function makeWarmupGroup(
   midi: number,
   label: PracticePatternNote["label"],
+  repeatCount = 4,
 ): PracticePatternNote[] {
-  return Array.from({ length: 4 }, () => ({ midi, label }));
+  return Array.from({ length: repeatCount }, () => ({ midi, label }));
 }
 
 function practicePatternById(id: string): PracticePattern {
