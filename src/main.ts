@@ -114,7 +114,42 @@ type PracticePatternResult = {
   bleedMidi: number | null;
 };
 
+type InstrumentStringSetup = {
+  id: string;
+  label: string;
+  openMidi: number;
+};
+
+type InstrumentPosition = {
+  stringId: string;
+  stringLabel: string;
+  finger: number;
+};
+
+type PracticeAnalysisStep = {
+  key: string;
+  sequenceIndex: number;
+  expectedMs: number;
+  targetIndex: number;
+  targetMidi: number;
+  targetLabel: string;
+  delayMs: number | null;
+  firstPlayedMidi: number | null;
+  wrongCounts: Map<number, number>;
+};
+
+type PracticeAnalysisNoteAggregate = {
+  targetMidi: number;
+  targetLabel: string;
+  expectedCount: number;
+  heardCount: number;
+  delayMsValues: number[];
+  wrongCounts: Map<number, number>;
+};
+
 type PracticePatternPassDirection = "forward" | "backward";
+type TuningPhase = "idle" | "tuning" | "review" | "complete";
+type TuningResultStatus = "pending" | "listening" | "good" | "needs-work";
 
 type PracticePatternPassSummary = {
   direction: PracticePatternPassDirection;
@@ -157,6 +192,29 @@ type SheetEntrySlot = {
   naturalMidi: number;
   accidental: SheetEntryAccidental;
   midi: number;
+};
+
+type TuningTarget = {
+  slotIndex: number;
+  stringIndex: number;
+  slot: SheetEntrySlot;
+};
+
+type TuningSample = {
+  tMs: number;
+  cents: number;
+  midiFloat: number;
+  confidence: number;
+};
+
+type TuningResult = {
+  status: TuningResultStatus;
+  cents: number | null;
+  heardMidi: number | null;
+  verified: boolean;
+  bleedFrameCount: number;
+  bleedMaxRatio: number;
+  bleedStringCounts: Map<string, number>;
 };
 
 const PATTERN_ENTRY_ID = "pattern-entry";
@@ -225,6 +283,21 @@ const TRAIL_START_LEFT_PCT = 58;
 const TRAIL_END_LEFT_PCT = 2;
 const BATCH_FADE_MS = 1700;
 const PRACTICE_PATTERN_NOTES_PER_ROW = 16;
+const TUNING_TARGETS_PER_ROW = 8;
+const TUNING_SAMPLE_WINDOW_MS = 1550;
+const TUNING_MIN_SAMPLES = 8;
+const TUNING_STABLE_SPREAD_CENTS = 16;
+const TUNING_READY_HOLD_MS = 900;
+const TUNING_DEFAULT_TOLERANCE_CENTS = 8;
+const TUNING_WRONG_NOTE_CENTS = 650;
+const TUNING_BLEED_REPORT_THRESHOLD = 0.12;
+const INSTRUMENT_STRINGS: InstrumentStringSetup[] = [
+  { id: "s1", label: "S1", openMidi: 74 },
+  { id: "s2", label: "S2", openMidi: 69 },
+  { id: "s3", label: "S3", openMidi: 62 },
+  { id: "s4", label: "S4", openMidi: 57 },
+];
+const INSTRUMENT_FINGER_SEMITONES = [0, 2, 4, 5, 7] as const;
 
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
@@ -268,9 +341,25 @@ let sheetEntrySlotValue: SheetEntrySlotValue = "eighth";
 let sheetEntryBars = 1;
 let sheetEntrySlotCount = defaultSheetSlotCount(sheetEntryTimeSignature, sheetEntrySlotValue, sheetEntryBars);
 let sheetEntrySlots: Array<SheetEntrySlot | null> = createEmptySheetSlots(sheetEntrySlotCount);
+let tuningStringCount = INSTRUMENT_STRINGS.length;
+let tuningEntryTool: SheetEntryTool = "natural";
+let tuningSlots: Array<SheetEntrySlot | null> = INSTRUMENT_STRINGS.map((string) =>
+  sheetEntrySlotFromMidi(string.openMidi),
+);
+let tuningPhase: TuningPhase = "idle";
+let tuningTargetCursor = 0;
+let tuningSamples: TuningSample[] = [];
+let tuningStableSinceMs: number | null = null;
+let tuningResults: TuningResult[] = [];
+let tuningAdvanceTimer: number | null = null;
+let tuningLastInstruction = "Enter one open-string note per string, then start.";
+let tuningToleranceCents = TUNING_DEFAULT_TOLERANCE_CENTS;
 let practicePatternResults: PracticePatternResult[] = createPracticePatternResults();
 let practicePatternPassSummary: PracticePatternPassSummary | null = null;
 let practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+let practiceAnalysisSteps: PracticeAnalysisStep[] = [];
+let practiceAnalysisStepMap = new Map<string, PracticeAnalysisStep>();
+let showPracticeAnalysis = false;
 sequenceSettings.bpm = practicePatternTempoRamp.initialBpm;
 state.practice.targetBpm = sequenceSettings.bpm;
 let sequenceSubMode: SequenceSubMode = "single-beat";
@@ -325,6 +414,7 @@ type UiRefs = {
   practicePatternLoopModeSelect: HTMLSelectElement;
   practicePatternName: HTMLElement;
   practicePatternPlayBtn: HTMLButtonElement;
+  practiceAnalysisBtn: HTMLButtonElement;
   practicePatternReadout: HTMLSpanElement;
   practiceRampStartInput: HTMLInputElement;
   practiceRampStepInput: HTMLInputElement;
@@ -336,10 +426,22 @@ type UiRefs = {
   practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
   practiceDebugSection: HTMLDivElement;
+  practiceAnalysisPanel: HTMLDivElement;
   practicePeakThresholdInput: HTMLInputElement;
   practicePeakThresholdValue: HTMLSpanElement;
   practicePeakMergeInput: HTMLInputElement;
   practiceDebug: HTMLDivElement;
+  tuningPanel: HTMLDivElement;
+  tuningCommand: HTMLDivElement;
+  tuningMeter: HTMLDivElement;
+  tuningStartBtn: HTMLButtonElement;
+  tuningPrevBtn: HTMLButtonElement;
+  tuningNextBtn: HTMLButtonElement;
+  tuningResetBtn: HTMLButtonElement;
+  tuningStringCountInput: HTMLInputElement;
+  tuningToleranceInput: HTMLInputElement;
+  tuningEntryToolSelect: HTMLSelectElement;
+  tuningSummary: HTMLDivElement;
   sequenceControls: HTMLDivElement;
   sequenceSubmodeSelect: HTMLSelectElement;
   noteEntryControls: HTMLDivElement;
@@ -381,19 +483,18 @@ type UiRefs = {
 };
 
 let ui: UiRefs | null = null;
+let lastSheetEntryPointerHandledAtMs = 0;
 
 function mountUi(): void {
   appRoot.innerHTML = `
     <main class="panel">
-      <h1 class="brand-wordmark" aria-label="Kaman">
-        <span class="brand-note" aria-hidden="true"></span>
-        <span>Kaman</span>
-      </h1>
+      <h1 class="brand-wordmark">Kaman</h1>
       <div class="controls">
         <button id="listen-btn" class="primary">Start Listening</button>
         <select id="mode-select" aria-label="Mode">
           <option value="live">Live</option>
           <option value="practice">Practice</option>
+          <option value="tuning">Tuning</option>
           <option value="sequence">Sequence</option>
           <option value="sheet-entry">Sheet Entry</option>
           <option value="spectrum">Spectrum</option>
@@ -513,6 +614,7 @@ function mountUi(): void {
                 </label>
               </div>
               <button id="practice-pattern-play" type="button" class="practice-pattern-play" aria-label="Start Warmup 1">▶</button>
+              <button id="practice-analysis-btn" type="button" class="practice-analysis-btn" disabled>Analyze</button>
               <div class="practice-pattern-copy">
                 <strong id="practice-pattern-name">Warmup 1</strong>
                 <span id="practice-pattern-readout">Ready</span>
@@ -530,6 +632,32 @@ function mountUi(): void {
               </div>
               <div id="practice-debug" class="practice-debug"></div>
             </div>
+            <div id="practice-analysis-panel" class="practice-analysis-panel"></div>
+          </div>
+          <div id="tuning-panel" class="tuning-panel">
+            <div id="tuning-command" class="tuning-command">Enter one open-string note per string, then start.</div>
+            <div id="tuning-meter" class="tuning-meter" aria-label="Live tuning cents meter"></div>
+            <div class="tuning-controls">
+              <label>Strings
+                <input id="tuning-string-count" type="number" min="1" max="8" step="1" value="4" />
+              </label>
+              <label>Tolerance
+                <input id="tuning-tolerance" type="number" min="2" max="25" step="1" value="8" />
+              </label>
+              <label>Click
+                <select id="tuning-entry-tool">
+                  <option value="natural" selected>Natural</option>
+                  <option value="sharp">Sharp</option>
+                  <option value="flat">Flat</option>
+                  <option value="rest">Clear</option>
+                </select>
+              </label>
+              <button id="tuning-start" type="button" class="primary">Start Tuning</button>
+              <button id="tuning-prev" type="button">Prev</button>
+              <button id="tuning-next" type="button">Next</button>
+              <button id="tuning-reset" type="button">Reset</button>
+            </div>
+            <div id="tuning-summary" class="tuning-summary"></div>
           </div>
           <div id="sequence-controls" class="sequence-controls">
             <label>Submode
@@ -636,6 +764,7 @@ function mountUi(): void {
   const practicePatternLoopModeSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-loop-mode");
   const practicePatternName = appRoot.querySelector<HTMLElement>("#practice-pattern-name");
   const practicePatternPlayBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-play");
+  const practiceAnalysisBtn = appRoot.querySelector<HTMLButtonElement>("#practice-analysis-btn");
   const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
   const practiceRampStartInput = appRoot.querySelector<HTMLInputElement>("#practice-ramp-start");
   const practiceRampStepInput = appRoot.querySelector<HTMLInputElement>("#practice-ramp-step");
@@ -647,10 +776,22 @@ function mountUi(): void {
   const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
   const practiceDebugSection = appRoot.querySelector<HTMLDivElement>("#practice-debug-section");
+  const practiceAnalysisPanel = appRoot.querySelector<HTMLDivElement>("#practice-analysis-panel");
   const practicePeakThresholdInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-threshold");
   const practicePeakThresholdValue = appRoot.querySelector<HTMLSpanElement>("#practice-peak-threshold-value");
   const practicePeakMergeInput = appRoot.querySelector<HTMLInputElement>("#practice-peak-merge");
   const practiceDebug = appRoot.querySelector<HTMLDivElement>("#practice-debug");
+  const tuningPanel = appRoot.querySelector<HTMLDivElement>("#tuning-panel");
+  const tuningCommand = appRoot.querySelector<HTMLDivElement>("#tuning-command");
+  const tuningMeter = appRoot.querySelector<HTMLDivElement>("#tuning-meter");
+  const tuningStartBtn = appRoot.querySelector<HTMLButtonElement>("#tuning-start");
+  const tuningPrevBtn = appRoot.querySelector<HTMLButtonElement>("#tuning-prev");
+  const tuningNextBtn = appRoot.querySelector<HTMLButtonElement>("#tuning-next");
+  const tuningResetBtn = appRoot.querySelector<HTMLButtonElement>("#tuning-reset");
+  const tuningStringCountInput = appRoot.querySelector<HTMLInputElement>("#tuning-string-count");
+  const tuningToleranceInput = appRoot.querySelector<HTMLInputElement>("#tuning-tolerance");
+  const tuningEntryToolSelect = appRoot.querySelector<HTMLSelectElement>("#tuning-entry-tool");
+  const tuningSummary = appRoot.querySelector<HTMLDivElement>("#tuning-summary");
   const sequenceControls = appRoot.querySelector<HTMLDivElement>("#sequence-controls");
   const sequenceSubmodeSelect = appRoot.querySelector<HTMLSelectElement>("#sequence-submode-select");
   const noteEntryControls = appRoot.querySelector<HTMLDivElement>("#note-entry-controls");
@@ -706,6 +847,7 @@ function mountUi(): void {
     !practicePatternLoopModeSelect ||
     !practicePatternName ||
     !practicePatternPlayBtn ||
+    !practiceAnalysisBtn ||
     !practicePatternReadout ||
     !practiceRampStartInput ||
     !practiceRampStepInput ||
@@ -717,10 +859,22 @@ function mountUi(): void {
     !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
     !practiceDebugSection ||
+    !practiceAnalysisPanel ||
     !practicePeakThresholdInput ||
     !practicePeakThresholdValue ||
     !practicePeakMergeInput ||
     !practiceDebug ||
+    !tuningPanel ||
+    !tuningCommand ||
+    !tuningMeter ||
+    !tuningStartBtn ||
+    !tuningPrevBtn ||
+    !tuningNextBtn ||
+    !tuningResetBtn ||
+    !tuningStringCountInput ||
+    !tuningToleranceInput ||
+    !tuningEntryToolSelect ||
+    !tuningSummary ||
     !sequenceControls ||
     !sequenceSubmodeSelect ||
     !noteEntryControls ||
@@ -779,6 +933,7 @@ function mountUi(): void {
     practicePatternLoopModeSelect,
     practicePatternName,
     practicePatternPlayBtn,
+    practiceAnalysisBtn,
     practicePatternReadout,
     practiceRampStartInput,
     practiceRampStepInput,
@@ -790,10 +945,22 @@ function mountUi(): void {
     practiceCorrectionSourceSelect,
     practiceDebugToggle,
     practiceDebugSection,
+    practiceAnalysisPanel,
     practicePeakThresholdInput,
     practicePeakThresholdValue,
     practicePeakMergeInput,
     practiceDebug,
+    tuningPanel,
+    tuningCommand,
+    tuningMeter,
+    tuningStartBtn,
+    tuningPrevBtn,
+    tuningNextBtn,
+    tuningResetBtn,
+    tuningStringCountInput,
+    tuningToleranceInput,
+    tuningEntryToolSelect,
+    tuningSummary,
     sequenceControls,
     sequenceSubmodeSelect,
     noteEntryControls,
@@ -849,6 +1016,11 @@ function mountUi(): void {
     void onTogglePracticePatternPlayback();
   });
 
+  practiceAnalysisBtn.addEventListener("click", () => {
+    showPracticeAnalysis = !showPracticeAnalysis;
+    scheduleRender();
+  });
+
   practicePatternSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     const pattern = practicePatternById(target.value);
@@ -856,6 +1028,7 @@ function mountUi(): void {
     applyPracticePatternDefaults(pattern);
     practicePatternPassSummary = null;
     practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    resetPracticeAnalysis();
     practicePatternLastScrolledRow = -1;
     stopPracticePatternPlayback(true);
     setPracticeBpm(practicePatternTempoRamp.initialBpm, true);
@@ -874,6 +1047,7 @@ function mountUi(): void {
     practicePatternLoopMode = asPracticePatternLoopMode(target.value);
     practicePatternResults = createPracticePatternResults();
     practicePatternCycleIndex = practicePatternCycleIndexForNow();
+    resetPracticeAnalysis();
     scheduleRender();
   });
 
@@ -966,7 +1140,81 @@ function mountUi(): void {
     scheduleRender();
   });
 
+  tuningStartBtn.addEventListener("click", () => {
+    void onToggleTuning();
+  });
+
+  tuningPrevBtn.addEventListener("click", () => {
+    moveTuningCursor(-1);
+  });
+
+  tuningNextBtn.addEventListener("click", () => {
+    moveTuningCursor(1);
+  });
+
+  tuningResetBtn.addEventListener("click", () => {
+    resetTuningSession();
+    scheduleRender();
+  });
+
+  tuningStringCountInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    tuningStringCount = clamp(parseInt(target.value || "4", 10), 1, 8);
+    target.value = String(tuningStringCount);
+    resizeTuningSlots(tuningStringCount);
+    resetTuningSession();
+    scheduleRender();
+  });
+
+  tuningToleranceInput.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = parseInt(target.value || String(TUNING_DEFAULT_TOLERANCE_CENTS), 10);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    tuningToleranceCents = clamp(parsed, 2, 25);
+    scheduleRender();
+  });
+
+  tuningToleranceInput.addEventListener("change", (event) => {
+    const target = event.target as HTMLInputElement;
+    const parsed = parseInt(target.value || String(TUNING_DEFAULT_TOLERANCE_CENTS), 10);
+    tuningToleranceCents = Number.isFinite(parsed)
+      ? clamp(parsed, 2, 25)
+      : TUNING_DEFAULT_TOLERANCE_CENTS;
+    target.value = String(tuningToleranceCents);
+    scheduleRender();
+  });
+
+  tuningEntryToolSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    tuningEntryTool = asSheetEntryTool(target.value);
+    scheduleRender();
+  });
+
+  staff.addEventListener("pointerdown", (event) => {
+    if (state.mode === "tuning") {
+      event.preventDefault();
+      lastSheetEntryPointerHandledAtMs = performance.now();
+      handleTuningSheetClick(event);
+      return;
+    }
+    if (!isSheetEntryEditable()) {
+      return;
+    }
+    event.preventDefault();
+    lastSheetEntryPointerHandledAtMs = performance.now();
+    handleStaffSheetEntryClick(event);
+  });
+
   staff.addEventListener("click", (event) => {
+    if (performance.now() - lastSheetEntryPointerHandledAtMs < 350) {
+      return;
+    }
+    if (state.mode === "tuning") {
+      handleTuningSheetClick(event);
+      return;
+    }
     handleStaffSheetEntryClick(event);
   });
 
@@ -1244,6 +1492,7 @@ function render(): void {
   ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
   ui.liveMetronomeControls.style.display = state.mode === "practice" ? "grid" : "none";
   ui.practicePanel.style.display = state.mode === "practice" ? "block" : "none";
+  ui.tuningPanel.style.display = state.mode === "tuning" ? "block" : "none";
   ui.sequenceControls.style.display = state.mode === "sequence" ? "grid" : "none";
   const patternEntryPracticeActive = state.mode === "practice" && isPatternEntrySelected();
   ui.noteEntryControls.style.display =
@@ -1254,6 +1503,8 @@ function render(): void {
       ? "Spectrum Output"
       : state.mode === "practice"
         ? ""
+        : state.mode === "tuning"
+          ? "Tuning"
         : state.mode === "sheet-entry"
           ? "Sheet Note Entry"
           : state.mode === "live"
@@ -1268,6 +1519,13 @@ function render(): void {
     ui.noteEntryBarsInput.value = String(sheetEntryBars);
   }
   ui.noteEntryToolSelect.value = sheetEntryTool;
+  if (activeElement !== ui.tuningStringCountInput) {
+    ui.tuningStringCountInput.value = String(tuningStringCount);
+  }
+  if (activeElement !== ui.tuningToleranceInput) {
+    ui.tuningToleranceInput.value = String(tuningToleranceCents);
+  }
+  ui.tuningEntryToolSelect.value = tuningEntryTool;
   if (activeElement !== ui.liveBpmInput) {
     ui.liveBpmInput.value = String(sequenceSettings.bpm);
   }
@@ -1323,11 +1581,11 @@ function render(): void {
   ui.trailToggle.checked = enableFadeTrail;
   ui.staff.classList.toggle(
     "sheet-entry-active",
-    state.mode === "sheet-entry" || patternEntryPracticeActive,
+    state.mode === "sheet-entry" || state.mode === "tuning" || patternEntryPracticeActive,
   );
   ui.staff.classList.toggle(
     "practice-sheet-active",
-    state.mode === "practice" || state.mode === "sheet-entry",
+    state.mode === "practice" || state.mode === "sheet-entry" || state.mode === "tuning",
   );
   syncMetronomeAnimationLoop();
 
@@ -1347,6 +1605,7 @@ function render(): void {
   ui.liveMetaLine.textContent = `${freqText} | ${confText} | ${centsLine} | ${statusText}`;
   ui.liveMetaLine.style.display = state.mode === "practice" ? "none" : "";
   renderPracticePanel();
+  renderTuningPanel();
   ui.purityMetaLine.style.display = stringPurityActive && state.mode !== "practice" ? "" : "none";
   if (stringPurityActive) {
     ui.purityMetaLine.textContent = formatStringPurityLine(lastFrame);
@@ -1356,6 +1615,7 @@ function render(): void {
 
   const singleBeatModeActive = state.mode === "sequence" && sequenceSubMode === "single-beat";
   const sheetEntryModeActive = state.mode === "sheet-entry";
+  const tuningModeActive = state.mode === "tuning";
   const spectrumModeActive = state.mode === "spectrum";
   const practicePatternStaffActive = state.mode === "practice";
   const currentSnapshot = buildCurrentNoteSnapshot(displayedMidi);
@@ -1368,6 +1628,15 @@ function render(): void {
   if (spectrumModeActive) {
     ui.staffBatchLayer.style.display = "none";
     ui.staffBatchLayer.innerHTML = "";
+    ui.noteGroup.style.visibility = "hidden";
+    ui.ledgerLayer.innerHTML = "";
+    ui.trailLayer.innerHTML = "";
+    trailNotes.length = 0;
+    previousDisplayedSnapshot = null;
+  } else if (tuningModeActive) {
+    ui.staffBatchLayer.style.display = "block";
+    ui.staffBatchLayer.innerHTML = renderStaffTuningSheet(nowMs);
+    scrollTuningSheetToActiveRow();
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -1421,7 +1690,7 @@ function render(): void {
     previousDisplayedSnapshot = null;
   }
 
-  const showMetronome = enableVisualMetronome && state.mode !== "spectrum";
+  const showMetronome = enableVisualMetronome && state.mode !== "spectrum" && state.mode !== "tuning";
   ui.metronomeBox.style.display = showMetronome ? "block" : "none";
   if (showMetronome) {
     ui.metronomeBox.innerHTML = renderVisualMetronome(performance.now());
@@ -1434,6 +1703,11 @@ function render(): void {
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent = "Live spectrum | log frequency scale | fixed-do reference labels";
     ui.sequenceSummary.textContent = renderSpectrumSummary(lastFrame, minBleedScore);
+  } else if (state.mode === "tuning") {
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent = "";
+    ui.sequenceSummary.textContent = "";
   } else if (state.mode === "sheet-entry") {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
@@ -1511,6 +1785,7 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
   practicePatternResults = createPracticePatternResults();
   practicePatternPassSummary = null;
   practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+  resetPracticeAnalysis();
   practicePatternPlaying = true;
   practicePatternActiveIndex = null;
   practicePatternCycleIndex = 0;
@@ -1545,6 +1820,7 @@ function stopPracticePatternPlayback(resetResults: boolean): void {
     practicePatternResults = createPracticePatternResults();
     practicePatternPassSummary = null;
     practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    resetPracticeAnalysis();
   }
   scheduleRender();
 }
@@ -1679,11 +1955,12 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   if (!position) {
     return;
   }
+  ensurePracticeAnalysisStep(position);
   markElapsedPracticePatternSteps(position);
   capturePracticePatternBleedFrame(frame);
 
   const playedMidi =
-    state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
+    state.live.displayedMidi ?? state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
   if (playedMidi === null) {
     return;
   }
@@ -1713,6 +1990,7 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   }
 
   const isCorrect = playedMidi === target.midi;
+  recordPracticeAnalysisPlayed(position, assignmentStepIndex, noteIndex, playedMidi, frame.tMs);
   if (result.status === "pending" || (result.status === "wrong" && result.playedMidi === null)) {
     result.status = isCorrect ? "correct" : "wrong";
     result.playedMidi = playedMidi;
@@ -1730,6 +2008,90 @@ function markElapsedPracticePatternSteps(position: PracticePatternPosition): voi
     activeStepIndex,
     position.passStartStepIndex,
   );
+}
+
+function ensurePracticeAnalysisStep(
+  position: PracticePatternPosition,
+  stepIndex = position.stepIndex,
+): PracticeAnalysisStep | null {
+  return ensurePracticeAnalysisStepForParts(
+    position.cycleKey,
+    position.passStartStepIndex,
+    stepIndex,
+    position.order,
+  );
+}
+
+function ensurePracticeAnalysisStepForParts(
+  cycleKey: number,
+  passStartStepIndex: number,
+  stepIndex: number,
+  order: number[],
+): PracticeAnalysisStep | null {
+  const noteIndex = order[stepIndex];
+  const target = noteIndex === undefined ? null : selectedPracticePattern().notes[noteIndex];
+  if (noteIndex === undefined || !target) {
+    return null;
+  }
+
+  const key = `${cycleKey}:${stepIndex}`;
+  const existing = practiceAnalysisStepMap.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const stepOffset = stepIndex - passStartStepIndex;
+  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const step: PracticeAnalysisStep = {
+    key,
+    sequenceIndex: practiceAnalysisSteps.length,
+    expectedMs: practicePatternPassStartedAtMs + stepOffset * noteDurationMs,
+    targetIndex: noteIndex,
+    targetMidi: target.midi,
+    targetLabel: target.label,
+    delayMs: null,
+    firstPlayedMidi: null,
+    wrongCounts: new Map<number, number>(),
+  };
+  practiceAnalysisStepMap.set(key, step);
+  practiceAnalysisSteps.push(step);
+  return step;
+}
+
+function recordPracticeAnalysisPlayed(
+  position: PracticePatternPosition,
+  assignmentStepIndex: number | null,
+  noteIndex: number,
+  playedMidi: number,
+  playedAtMs: number,
+): void {
+  const assignedStepIndex = assignmentStepIndex ?? position.stepIndex;
+  const step = ensurePracticeAnalysisStep(position, assignedStepIndex);
+  const target = selectedPracticePattern().notes[noteIndex];
+  if (!step || !target) {
+    return;
+  }
+
+  if (step.firstPlayedMidi === null) {
+    step.firstPlayedMidi = playedMidi;
+    step.delayMs = playedAtMs - step.expectedMs;
+  }
+
+  if (playedMidi === target.midi) {
+    return;
+  }
+
+  if (step.wrongCounts.has(playedMidi)) {
+    return;
+  }
+
+  step.wrongCounts.set(playedMidi, (step.wrongCounts.get(playedMidi) ?? 0) + 1);
+}
+
+function resetPracticeAnalysis(): void {
+  practiceAnalysisSteps = [];
+  practiceAnalysisStepMap = new Map<string, PracticeAnalysisStep>();
+  showPracticeAnalysis = false;
 }
 
 function practicePatternTimingCorrectionWindowMs(): number {
@@ -1810,6 +2172,9 @@ function finalizePracticePatternPass(cycleKey: number, order: number[]): void {
     direction === "backward" && practicePatternLoopMode === "back-and-forth"
       ? order.length
       : pattern.notes.length;
+  for (let stepIndex = startStepIndex; stepIndex < endStepIndex; stepIndex += 1) {
+    ensurePracticeAnalysisStepForParts(cycleKey, startStepIndex, stepIndex, order);
+  }
   markElapsedPracticePatternOrder(order, endStepIndex, startStepIndex);
 
   const passIndexes = order.slice(startStepIndex, endStepIndex);
@@ -2153,6 +2518,445 @@ function resetPracticeEstimate(targetBpm = sequenceSettings.bpm): void {
   };
 }
 
+async function onToggleTuning(): Promise<void> {
+  if (tuningPhase !== "idle" && tuningPhase !== "complete") {
+    resetTuningSession();
+    scheduleRender();
+    return;
+  }
+
+  if (state.mode !== "tuning") {
+    state.mode = "tuning";
+  }
+
+  const targets = tuningTargets();
+  if (targets.length === 0) {
+    tuningLastInstruction = "Enter one open-string note per string, then start.";
+    scheduleRender();
+    return;
+  }
+
+  if (!state.listening) {
+    await onToggleListening();
+    if (!state.listening) {
+      return;
+    }
+  }
+
+  beginTuningPass("tuning");
+  scheduleRender();
+}
+
+function beginTuningPass(phase: Exclude<TuningPhase, "idle" | "complete">): void {
+  clearTuningAdvanceTimer();
+  const targets = tuningTargets();
+  tuningPhase = phase;
+  tuningTargetCursor = clamp(tuningTargetCursor, 0, Math.max(0, targets.length - 1));
+  tuningSamples = [];
+  tuningStableSinceMs = null;
+  tuningResults = targets.map((target, index) => {
+    const existing = tuningResults[index] ?? null;
+    return {
+      status: index === tuningTargetCursor ? "listening" : existing?.status ?? "pending",
+      cents: existing?.cents ?? null,
+      heardMidi: existing?.heardMidi ?? null,
+      verified: phase === "review" ? false : existing?.verified ?? false,
+      bleedFrameCount: existing?.bleedFrameCount ?? 0,
+      bleedMaxRatio: existing?.bleedMaxRatio ?? 0,
+      bleedStringCounts: existing?.bleedStringCounts ?? new Map<string, number>(),
+    };
+  });
+  tuningLastInstruction = tuningInstructionForCurrentTarget();
+}
+
+function resetTuningSession(): void {
+  clearTuningAdvanceTimer();
+  tuningPhase = "idle";
+  tuningTargetCursor = 0;
+  tuningSamples = [];
+  tuningStableSinceMs = null;
+  tuningResults = tuningTargets().map(() => ({
+    status: "pending",
+    cents: null,
+    heardMidi: null,
+    verified: false,
+    bleedFrameCount: 0,
+    bleedMaxRatio: 0,
+    bleedStringCounts: new Map<string, number>(),
+  }));
+  tuningLastInstruction = "Enter one open-string note per string, then start.";
+}
+
+function clearTuningAdvanceTimer(): void {
+  if (tuningAdvanceTimer !== null) {
+    window.clearTimeout(tuningAdvanceTimer);
+    tuningAdvanceTimer = null;
+  }
+}
+
+function moveTuningCursor(delta: number): void {
+  const targets = tuningTargets();
+  if (targets.length === 0) {
+    resetTuningSession();
+    scheduleRender();
+    return;
+  }
+  clearTuningAdvanceTimer();
+  tuningTargetCursor = clamp(tuningTargetCursor + delta, 0, targets.length - 1);
+  tuningSamples = [];
+  tuningStableSinceMs = null;
+  if (tuningPhase === "idle" || tuningPhase === "complete") {
+    tuningPhase = "tuning";
+  }
+  ensureTuningResults();
+  const result = tuningResults[tuningTargetCursor];
+  if (result) {
+    result.status = "listening";
+  }
+  tuningLastInstruction = tuningInstructionForCurrentTarget();
+  scheduleRender();
+}
+
+function ensureTuningResults(): void {
+  const targets = tuningTargets();
+  if (tuningResults.length === targets.length) {
+    return;
+  }
+  tuningResults = targets.map((_, index) => tuningResults[index] ?? {
+    status: "pending",
+    cents: null,
+    heardMidi: null,
+    verified: false,
+    bleedFrameCount: 0,
+    bleedMaxRatio: 0,
+    bleedStringCounts: new Map<string, number>(),
+  });
+}
+
+function captureTuningBleedFrame(frame: PitchFrame, result: TuningResult | null): void {
+  if (!result || frame.midi === null || frame.confidence < liveSettings.confidenceThreshold) {
+    return;
+  }
+  const bleedRatio = frame.adjacentBleedRatio ?? 0;
+  result.bleedFrameCount += 1;
+  result.bleedMaxRatio = Math.max(result.bleedMaxRatio, bleedRatio);
+  if (frame.bleedString && bleedRatio >= TUNING_BLEED_REPORT_THRESHOLD) {
+    result.bleedStringCounts.set(
+      frame.bleedString,
+      (result.bleedStringCounts.get(frame.bleedString) ?? 0) + 1,
+    );
+  }
+}
+
+function captureTuningFrame(frame: PitchFrame): void {
+  if (state.mode !== "tuning" || (tuningPhase !== "tuning" && tuningPhase !== "review")) {
+    return;
+  }
+  const targets = tuningTargets();
+  if (targets.length === 0) {
+    tuningLastInstruction = "Enter one open-string note per string, then start.";
+    return;
+  }
+  ensureTuningResults();
+  const target = targets[tuningTargetCursor] ?? targets[0];
+  if (!target) {
+    return;
+  }
+  const result = tuningResults[tuningTargetCursor];
+  if (result) {
+    result.status = "listening";
+  }
+  captureTuningBleedFrame(frame, result ?? null);
+
+  if (
+    frame.midiFloat === null ||
+    frame.midi === null ||
+    frame.confidence < liveSettings.confidenceThreshold
+  ) {
+    tuningLastInstruction = tuningInstructionForCurrentTarget();
+    return;
+  }
+
+  const cents = (frame.midiFloat - target.slot.midi) * 100;
+  if (Math.abs(cents) > TUNING_WRONG_NOTE_CENTS) {
+    tuningSamples = [];
+    tuningStableSinceMs = null;
+    if (result) {
+      result.status = "needs-work";
+      result.cents = null;
+      result.heardMidi = frame.midi;
+    }
+    tuningLastInstruction =
+      `I hear ${midiToScientific(frame.midi)}. Play string ${target.stringIndex + 1} open: ${formatSheetEntrySlot(target.slot)}.`;
+    return;
+  }
+
+  tuningSamples.push({
+    tMs: frame.tMs,
+    cents,
+    midiFloat: frame.midiFloat,
+    confidence: frame.confidence,
+  });
+  tuningSamples = tuningSamples.filter((sample) => frame.tMs - sample.tMs <= TUNING_SAMPLE_WINDOW_MS);
+
+  const stats = tuningSampleStats();
+  if (!stats || !result) {
+    tuningLastInstruction = "Hold the open string a little longer.";
+    return;
+  }
+
+  result.cents = stats.medianCents;
+  result.heardMidi = Math.round(stats.medianMidiFloat);
+  const tolerance = tuningToleranceCents;
+  const stable = stats.sampleCount >= TUNING_MIN_SAMPLES && stats.spreadCents <= TUNING_STABLE_SPREAD_CENTS;
+  const inTune = stable && Math.abs(stats.medianCents) <= tolerance;
+
+  if (!stable) {
+    tuningStableSinceMs = null;
+    tuningLastInstruction = "Hold it steady so I can read the pitch.";
+    return;
+  }
+
+  if (!inTune) {
+    tuningStableSinceMs = null;
+    result.status = "needs-work";
+    tuningLastInstruction = tuningAdjustmentCommand(stats.medianCents);
+    return;
+  }
+
+  if (tuningStableSinceMs === null) {
+    tuningStableSinceMs = frame.tMs;
+  }
+  result.status = "good";
+  result.verified = tuningPhase === "review";
+  tuningLastInstruction = tuningPhase === "review"
+    ? `String ${target.stringIndex + 1} still holds. Keep it ringing.`
+    : `String ${target.stringIndex + 1} is good. Keep it ringing.`;
+
+  if (frame.tMs - tuningStableSinceMs >= TUNING_READY_HOLD_MS && tuningAdvanceTimer === null) {
+    tuningAdvanceTimer = window.setTimeout(() => {
+      tuningAdvanceTimer = null;
+      advanceTuningTarget();
+    }, 260);
+  }
+}
+
+function advanceTuningTarget(): void {
+  const targets = tuningTargets();
+  tuningSamples = [];
+  tuningStableSinceMs = null;
+  if (targets.length === 0) {
+    resetTuningSession();
+    scheduleRender();
+    return;
+  }
+
+  if (tuningTargetCursor < targets.length - 1) {
+    tuningTargetCursor += 1;
+    const result = tuningResults[tuningTargetCursor];
+    if (result) {
+      result.status = "listening";
+    }
+    tuningLastInstruction = tuningInstructionForCurrentTarget();
+    scheduleRender();
+    return;
+  }
+
+  if (tuningPhase === "tuning") {
+    tuningPhase = "review";
+    tuningTargetCursor = 0;
+    tuningResults = tuningResults.map((result) => ({
+      ...result,
+      status: "pending",
+      verified: false,
+    }));
+    const first = tuningResults[0];
+    if (first) {
+      first.status = "listening";
+    }
+    tuningLastInstruction = "Review pass: play string 1 open again.";
+    scheduleRender();
+    return;
+  }
+
+  tuningPhase = "complete";
+  tuningLastInstruction = "All strings are reasonably tuned. Play through once by ear.";
+  scheduleRender();
+}
+
+function tuningSampleStats(): {
+  medianCents: number;
+  medianMidiFloat: number;
+  spreadCents: number;
+  sampleCount: number;
+} | null {
+  if (tuningSamples.length < 3) {
+    return null;
+  }
+  const centsValues = tuningSamples.map((sample) => sample.cents).sort((a, b) => a - b);
+  const midiValues = tuningSamples.map((sample) => sample.midiFloat).sort((a, b) => a - b);
+  const medianCents = median(centsValues);
+  const medianMidiFloat = median(midiValues);
+  const low = centsValues[Math.floor(centsValues.length * 0.1)] ?? centsValues[0];
+  const high = centsValues[Math.ceil(centsValues.length * 0.9) - 1] ?? centsValues[centsValues.length - 1];
+  return {
+    medianCents,
+    medianMidiFloat,
+    spreadCents: Math.abs(high - low),
+    sampleCount: tuningSamples.length,
+  };
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const mid = Math.floor(values.length / 2);
+  if (values.length % 2 === 1) {
+    return values[mid] ?? 0;
+  }
+  return ((values[mid - 1] ?? 0) + (values[mid] ?? 0)) / 2;
+}
+
+function tuningInstructionForCurrentTarget(): string {
+  const target = tuningTargets()[tuningTargetCursor] ?? null;
+  if (!target) {
+    return "Enter one open-string note per string, then start.";
+  }
+  const passLabel = tuningPhase === "review" ? "Review" : "Tune";
+  return `${passLabel}: play string ${target.stringIndex + 1} open, aiming for ${formatSheetEntrySlot(target.slot)}.`;
+}
+
+function tuningAdjustmentCommand(cents: number): string {
+  const amount = Math.abs(cents);
+  const size =
+    amount <= 14
+      ? "Tiny"
+      : amount <= 30
+        ? "Small"
+        : amount <= 70
+          ? "Careful"
+          : "Larger";
+  const direction = cents < 0 ? "raise" : "lower";
+  const signed = formatSigned(cents);
+  return `${size} tweak: ${direction} the pitch (${signed} cents).`;
+}
+
+function renderTuningPanel(): void {
+  if (!ui) return;
+  if (state.mode !== "tuning") {
+    return;
+  }
+  ensureTuningResults();
+  const targets = tuningTargets();
+  const current = targets[tuningTargetCursor] ?? null;
+  const currentResult = current ? tuningResults[tuningTargetCursor] ?? null : null;
+  ui.tuningStartBtn.textContent =
+    tuningPhase === "idle" || tuningPhase === "complete" ? "Start Tuning" : "Stop";
+  ui.tuningPrevBtn.disabled = targets.length === 0 || tuningTargetCursor <= 0;
+  ui.tuningNextBtn.disabled = targets.length === 0 || tuningTargetCursor >= targets.length - 1;
+  ui.tuningCommand.className = `tuning-command phase-${tuningPhase} ${currentResult ? `status-${currentResult.status}` : ""}`;
+  ui.tuningCommand.textContent = tuningLastInstruction;
+  ui.tuningMeter.innerHTML = renderTuningMeter(current, currentResult);
+  ui.tuningSummary.innerHTML = renderTuningSummary();
+}
+
+function renderTuningMeter(target: TuningTarget | null, result: TuningResult | null): string {
+  const cents = result?.cents ?? null;
+  const markerPct = cents === null ? 50 : 50 + clamp(cents, -50, 50);
+  const tolerancePct = clamp(tuningToleranceCents, 2, 25);
+  const targetText = target ? formatSheetEntrySlot(target.slot) : "-";
+  const centsText = cents === null ? "-" : `${formatSigned(cents)} cents`;
+  const directionText =
+    cents === null
+      ? "Waiting"
+      : Math.abs(cents) <= tuningToleranceCents
+        ? "Inside range"
+        : cents < 0
+          ? "Flat"
+          : "Sharp";
+
+  return `
+    <div class="tuning-meter-readout">
+      <span>Target ${targetText}</span>
+      <strong>${centsText}</strong>
+      <small>${directionText}</small>
+    </div>
+    <div class="tuning-meter-track" style="--marker:${markerPct.toFixed(1)}%; --tol:${tolerancePct.toFixed(1)}%;">
+      <span class="tuning-meter-zone"></span>
+      <span class="tuning-meter-center"></span>
+      <span class="tuning-meter-marker"></span>
+    </div>
+    <div class="tuning-meter-labels">
+      <span>flat</span>
+      <span>0</span>
+      <span>sharp</span>
+    </div>
+  `;
+}
+
+function renderTuningSummary(): string {
+  const targets = tuningTargets();
+  if (targets.length === 0) {
+    return `<div class="tuning-summary-empty">No open-string targets entered.</div>`;
+  }
+
+  return targets
+    .map((target, index) => {
+      const result = tuningResults[index] ?? {
+        status: "pending",
+        cents: null,
+        heardMidi: null,
+        verified: false,
+      };
+      const centsText = result.cents === null ? "-" : `${formatSigned(result.cents)}c`;
+      const label = formatSheetEntrySlot(target.slot);
+      const active = index === tuningTargetCursor && tuningPhase !== "idle" && tuningPhase !== "complete";
+      return `
+        <div class="tuning-summary-item status-${result.status} ${active ? "active" : ""}">
+          <span>${target.stringIndex + 1}</span>
+          <strong>${label}</strong>
+          <small>${result.verified ? "checked" : centsText}</small>
+        </div>
+      `;
+    })
+    .join("") + renderTuningBleedReport(targets);
+}
+
+function renderTuningBleedReport(targets: TuningTarget[]): string {
+  if (tuningPhase !== "complete") {
+    return "";
+  }
+  const rows = targets
+    .map((target, index) => {
+      const result = tuningResults[index] ?? null;
+      const maxBleed = result ? Math.round(result.bleedMaxRatio * 100) : 0;
+      const commonBleed = result ? mostCommonBleedString(result.bleedStringCounts) : null;
+      const message = !result || result.bleedFrameCount === 0
+        ? "No bleed reading"
+        : maxBleed < Math.round(TUNING_BLEED_REPORT_THRESHOLD * 100)
+          ? "No meaningful bleed"
+          : commonBleed
+            ? `Possible ${commonBleed} bleed, max ${maxBleed}%`
+            : `Possible bleed, max ${maxBleed}%`;
+      return `
+        <div class="tuning-bleed-row">
+          <span>String ${target.stringIndex + 1}</span>
+          <strong>${formatSheetEntrySlot(target.slot)}</strong>
+          <small>${message}</small>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="tuning-bleed-report">
+      <div class="tuning-bleed-title">Bleed report</div>
+      ${rows}
+    </div>
+  `;
+}
+
 function renderPracticePanel(): void {
   if (!ui) return;
 
@@ -2173,6 +2977,10 @@ function renderPracticePanel(): void {
     practicePatternPlaying ? `Stop ${pattern.name}` : `Start ${pattern.name}`,
   );
   ui.practicePatternPlayBtn.classList.toggle("playing", practicePatternPlaying);
+  const canAnalyze = practiceAnalysisSteps.length > 0 && !practicePatternPlaying;
+  ui.practiceAnalysisBtn.disabled = !canAnalyze;
+  ui.practiceAnalysisBtn.classList.toggle("active", showPracticeAnalysis);
+  ui.practiceAnalysisBtn.textContent = showPracticeAnalysis ? "Hide analysis" : "Analyze";
   ui.practicePatternReadout.textContent = practicePatternReadoutText();
   ui.practiceOverallFeedback.className = `practice-overall-feedback ${practicePatternPassSummary ? `status-${practicePatternPassSummary.tempoStatus}` : "status-idle"}`;
   ui.practiceOverallFeedback.textContent = practicePatternOverallFeedbackText();
@@ -2189,6 +2997,8 @@ function renderPracticePanel(): void {
   ui.practiceDetail.textContent =
     `±${practiceTolerancePct}% · ${practiceCorrectionSource}`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
+  ui.practiceAnalysisPanel.style.display = showPracticeAnalysis ? "block" : "none";
+  ui.practiceAnalysisPanel.innerHTML = showPracticeAnalysis ? renderPracticeAnalysis() : "";
 }
 
 function practicePatternOverallFeedbackText(): string {
@@ -2200,10 +3010,12 @@ function practicePatternOverallFeedbackText(): string {
   }
 
   if (summary.bleedDetected && summary.bleedFrameRatio >= 0.12) {
-    return "One string only";
+    return summary.bleedString
+      ? `Mute ${summary.bleedString} bleed`
+      : "One string only";
   }
   if (summary.wrong > 0) {
-    return "Check notes";
+    return practicePatternSpecificPitchFeedback() ?? "Check notes";
   }
   if (summary.tempoStatus === "play-faster") {
     return "Play faster";
@@ -2215,6 +3027,215 @@ function practicePatternOverallFeedbackText(): string {
     return "On tempo";
   }
   return "Good round";
+}
+
+function practicePatternSpecificPitchFeedback(): string | null {
+  const wrongAggregate = practiceAnalysisNoteAggregates()
+    .sort((a, b) => wrongCountTotal(b.wrongCounts) - wrongCountTotal(a.wrongCounts))
+    .find((aggregate) => aggregate.wrongCounts.size > 0);
+  if (!wrongAggregate) {
+    return null;
+  }
+  const targetName = midiToScientific(wrongAggregate.targetMidi);
+  const positions = instrumentPositionText(wrongAggregate.targetMidi);
+  return positions === "-"
+    ? `Check ${targetName}`
+    : `Check ${targetName}: ${positions}`;
+}
+
+function renderPracticeAnalysis(): string {
+  if (practiceAnalysisSteps.length === 0) {
+    return `<div class="practice-analysis-empty">Play and stop a practice round to collect analysis.</div>`;
+  }
+
+  const delays = practiceAnalysisSteps
+    .map((step) => step.delayMs)
+    .filter((delay): delay is number => delay !== null && Number.isFinite(delay));
+  const wrongTotal = practiceAnalysisSteps.reduce(
+    (sum, step) => sum + [...step.wrongCounts.values()].reduce((inner, count) => inner + count, 0),
+    0,
+  );
+  const playedCount = practiceAnalysisSteps.filter((step) => step.firstPlayedMidi !== null).length;
+  const noteAggregates = practiceAnalysisNoteAggregates();
+  const meanDelay = delays.length === 0
+    ? null
+    : delays.reduce((sum, delay) => sum + delay, 0) / delays.length;
+  const timingText = meanDelay === null
+    ? "No confident note onsets yet"
+    : `Average ${formatSigned(meanDelay)} ms | ${delays.length} onsets`;
+  const pitchText = `${noteAggregates.length} unique notes | ${playedCount}/${practiceAnalysisSteps.length} heard | ${wrongTotal} wrong-note event${wrongTotal === 1 ? "" : "s"}`;
+
+  return `
+    <div class="practice-analysis-summary">
+      <div><span>Timing</span><strong>${timingText}</strong></div>
+      <div><span>Pitch</span><strong>${pitchText}</strong></div>
+      <div><span>Tuning</span><strong>${instrumentTuningSummary()}</strong></div>
+    </div>
+    <div class="practice-analysis-block">
+      <div class="practice-analysis-heading">
+        <span>Delay histogram</span>
+        <small>0 ms is the expected note start</small>
+      </div>
+      ${renderPracticeDelayHistogram(delays)}
+    </div>
+    <div class="practice-analysis-block">
+      <div class="practice-analysis-heading">
+        <span>Pitch analysis</span>
+        <small>black is expected; red is mistaken played pitch</small>
+      </div>
+      ${renderPracticePitchAnalysisSheet(noteAggregates)}
+    </div>
+  `;
+}
+
+function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
+  const byTargetMidi = new Map<number, PracticeAnalysisNoteAggregate>();
+  for (const step of practiceAnalysisSteps) {
+    let aggregate = byTargetMidi.get(step.targetMidi);
+    if (!aggregate) {
+      aggregate = {
+        targetMidi: step.targetMidi,
+        targetLabel: step.targetLabel,
+        expectedCount: 0,
+        heardCount: 0,
+        delayMsValues: [],
+        wrongCounts: new Map<number, number>(),
+      };
+      byTargetMidi.set(step.targetMidi, aggregate);
+    }
+
+    aggregate.expectedCount += 1;
+    if (step.firstPlayedMidi !== null) {
+      aggregate.heardCount += 1;
+    }
+    if (step.delayMs !== null && Number.isFinite(step.delayMs)) {
+      aggregate.delayMsValues.push(step.delayMs);
+    }
+    for (const [wrongMidi, count] of step.wrongCounts.entries()) {
+      aggregate.wrongCounts.set(
+        wrongMidi,
+        (aggregate.wrongCounts.get(wrongMidi) ?? 0) + count,
+      );
+    }
+  }
+
+  return [...byTargetMidi.values()].sort((a, b) => a.targetMidi - b.targetMidi);
+}
+
+function wrongCountTotal(counts: Map<number, number>): number {
+  return [...counts.values()].reduce((sum, count) => sum + count, 0);
+}
+
+function renderPracticeDelayHistogram(delays: number[]): string {
+  const bins = [
+    { label: "< -300", min: Number.NEGATIVE_INFINITY, max: -300 },
+    { label: "-300", min: -300, max: -200 },
+    { label: "-200", min: -200, max: -100 },
+    { label: "-100", min: -100, max: -50 },
+    { label: "-50", min: -50, max: 0 },
+    { label: "0", min: 0, max: 50 },
+    { label: "+50", min: 50, max: 100 },
+    { label: "+100", min: 100, max: 200 },
+    { label: "+200", min: 200, max: 300 },
+    { label: "> +300", min: 300, max: Number.POSITIVE_INFINITY },
+  ];
+  const counts = bins.map((bin) =>
+    delays.filter((delay) => delay >= bin.min && delay < bin.max).length,
+  );
+  const maxCount = Math.max(1, ...counts);
+  const bars = bins
+    .map((bin, index) => {
+      const count = counts[index] ?? 0;
+      const height = count === 0 ? 3 : 12 + (count / maxCount) * 88;
+      const isCenter = bin.min === 0 || bin.max === 0;
+      return `
+        <div class="practice-histogram-bin ${isCenter ? "center-bin" : ""}">
+          <div class="practice-histogram-bar" style="height:${height.toFixed(1)}%"><span>${count || ""}</span></div>
+          <small>${bin.label}</small>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="practice-histogram-zero" aria-hidden="true"></div>
+    <div class="practice-histogram">${bars}</div>
+  `;
+}
+
+function renderPracticePitchAnalysisSheet(noteAggregates: PracticeAnalysisNoteAggregate[]): string {
+  const rowCount = Math.max(1, Math.ceil(noteAggregates.length / PRACTICE_PATTERN_NOTES_PER_ROW));
+  const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const startIndex = rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW;
+    const rowNotes = noteAggregates.slice(startIndex, startIndex + PRACTICE_PATTERN_NOTES_PER_ROW);
+    const slots = rowNotes.map((aggregate) => renderPracticeAnalysisSlot(aggregate, rowIndex)).join("");
+    const placeholders = Array.from(
+      { length: PRACTICE_PATTERN_NOTES_PER_ROW - rowNotes.length },
+      () => `<div class="practice-pattern-slot placeholder"></div>`,
+    ).join("");
+    return `
+      <div class="practice-sheet-row analysis-row has-clef" data-row-index="${rowIndex}">
+        ${renderStaffClef()}
+        <div class="practice-sheet-lines">
+          <div class="staff-line l1"></div>
+          <div class="staff-line l2"></div>
+          <div class="staff-line l3"></div>
+          <div class="staff-line l4"></div>
+          <div class="staff-line l5"></div>
+        </div>
+        <div class="practice-pattern-grid" style="--pattern-cols:${PRACTICE_PATTERN_NOTES_PER_ROW}">
+          ${slots}${placeholders}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `<div class="practice-analysis-sheet practice-sheet">${rows}</div>`;
+}
+
+function renderPracticeAnalysisSlot(aggregate: PracticeAnalysisNoteAggregate, rowIndex: number): string {
+  const y = midiToStaffY(aggregate.targetMidi);
+  const ledgers = ledgerLineYs(aggregate.targetMidi)
+    .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+    .join("");
+  const stemDirection = stemDirectionForMidi(aggregate.targetMidi);
+  const wrongNotes = [...aggregate.wrongCounts.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([midi, count], offsetIndex) => renderPracticeAnalysisWrongNote(midi, count, offsetIndex))
+    .join("");
+  const meanDelay = aggregate.delayMsValues.length === 0
+    ? null
+    : aggregate.delayMsValues.reduce((sum, delay) => sum + delay, 0) / aggregate.delayMsValues.length;
+  const delay = meanDelay === null ? "" : `${formatSigned(meanDelay)} ms avg`;
+  const label = `${midiToScientific(aggregate.targetMidi)} | ${midiToSolfege(aggregate.targetMidi)} | ${instrumentPositionText(aggregate.targetMidi)}`;
+
+  return `
+    <div class="practice-pattern-slot analysis-slot" data-row-index="${rowIndex}">
+      ${ledgers}
+      <div class="staff-batch-note value-quarter practice-analysis-target-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
+        <div class="staff-batch-note-head"></div>
+        <div class="staff-batch-note-stem"></div>
+      </div>
+      ${wrongNotes}
+      <div class="practice-pattern-target" title="${label}">${midiToScientific(aggregate.targetMidi)}</div>
+      <div class="practice-pattern-played">${aggregate.heardCount}/${aggregate.expectedCount} · ${delay || "-"}</div>
+    </div>
+  `;
+}
+
+function renderPracticeAnalysisWrongNote(midi: number, count: number, offsetIndex: number): string {
+  const y = midiToStaffY(midi);
+  const stemDirection = stemDirectionForMidi(midi);
+  const label = `${midiToScientific(midi)} | ${midiToSolfege(midi)} | ${instrumentPositionText(midi)}`;
+  const xOffset = (offsetIndex % 3) * 9 - 9;
+
+  return `
+    <div class="staff-batch-note value-quarter practice-analysis-wrong-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px; margin-left:${xOffset}px;" title="Played ${label}">
+      <div class="staff-batch-note-head"></div>
+      <div class="staff-batch-note-stem"></div>
+      ${count > 1 ? `<span class="practice-analysis-count">${count}</span>` : ""}
+    </div>
+  `;
 }
 
 function renderPracticeDebug(): string {
@@ -2346,7 +3367,7 @@ function practiceStatusLabel(status: TempoFrame["status"], listening: boolean): 
 }
 
 function isStringPurityActive(): boolean {
-  return enableStringPurityCheck || state.mode === "practice" || state.mode === "spectrum";
+  return enableStringPurityCheck || state.mode === "practice" || state.mode === "spectrum" || state.mode === "tuning";
 }
 
 function syncStringPurityPipeline(): void {
@@ -2533,7 +3554,7 @@ function renderVisualMetronome(nowMs: number): string {
 }
 
 function syncMetronomeAnimationLoop(): void {
-  const shouldAnimate = enableVisualMetronome || enableMetronomeSound;
+  const shouldAnimate = state.mode !== "tuning" && (enableVisualMetronome || enableMetronomeSound);
   if (shouldAnimate && metronomeRafId === null) {
     const tick = () => {
       metronomeRafId = null;
@@ -2653,6 +3674,9 @@ async function onToggleListening(): Promise<void> {
     lastFrame = null;
     lastTempoFrame = null;
     liveTracker.reset();
+    if (state.mode === "tuning") {
+      resetTuningSession();
+    }
     const freshState = createInitialState();
     state.live = freshState.live;
     state.practice = {
@@ -2733,7 +3757,9 @@ function onModeChange(event: Event): void {
           ? "spectrum"
           : target.value === "practice"
             ? "practice"
-            : "live";
+            : target.value === "tuning"
+              ? "tuning"
+              : "live";
   resetMetronomeClock();
   pipeline?.resetTempo();
   syncStringPurityPipeline();
@@ -2744,6 +3770,10 @@ function onModeChange(event: Event): void {
 
   if (state.mode !== "practice") {
     stopPracticePatternPlayback(false);
+  }
+
+  if (state.mode !== "tuning" && tuningPhase !== "idle") {
+    resetTuningSession();
   }
 
   if (state.mode !== "sequence") {
@@ -2925,6 +3955,7 @@ function onPitchFrame(frame: PitchFrame): void {
   }
 
   capturePracticePatternFrame(frame);
+  captureTuningFrame(frame);
 
   scheduleRender();
 }
@@ -3433,7 +4464,7 @@ function renderStaffPracticePattern(nowMs: number): string {
             <div class="staff-batch-note-stem"></div>
           </div>
           ${playedNoteHtml}
-          <div class="practice-pattern-target">${note.label}</div>
+          <div class="practice-pattern-target" title="${noteTooltip(note.midi)}">${note.label}</div>
           <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
         </div>
       `;
@@ -3445,7 +4476,8 @@ function renderStaffPracticePattern(nowMs: number): string {
     ).join("");
 
     return `
-      <div class="practice-sheet-row" data-row-index="${rowIndex}">
+      <div class="practice-sheet-row has-clef" data-row-index="${rowIndex}">
+        ${renderStaffClef()}
         <div class="practice-sheet-lines">
           <div class="staff-line l1"></div>
           <div class="staff-line l2"></div>
@@ -3496,11 +4528,55 @@ function renderPracticePlayedNote(midi: number): string {
   const stemDirection = stemDirectionForMidi(midi);
 
   return `
-    <div class="staff-batch-note value-quarter practice-pattern-played-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="Played ${midiToScientific(midi)}">
+    <div class="staff-batch-note value-quarter practice-pattern-played-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="Played ${noteTooltip(midi)}">
       <div class="staff-batch-note-head"></div>
       <div class="staff-batch-note-stem"></div>
     </div>
   `;
+}
+
+function renderStaffClef(): string {
+  return `<div class="practice-sheet-clef" aria-hidden="true">𝄞</div>`;
+}
+
+function noteTooltip(midi: number): string {
+  return `${midiToScientific(midi)} | ${midiToSolfege(midi)} | ${instrumentPositionText(midi)}`;
+}
+
+function instrumentTuningSummary(): string {
+  return INSTRUMENT_STRINGS
+    .map((string) => `${string.label}=${midiToScientific(string.openMidi)}`)
+    .join(", ");
+}
+
+function instrumentPositionText(midi: number): string {
+  const positions = instrumentPositionsForMidi(midi);
+  if (positions.length === 0) {
+    return "-";
+  }
+  return positions
+    .map((position) => `${position.stringLabel} ${fingerLabel(position.finger)}`)
+    .join(" / ");
+}
+
+function instrumentPositionsForMidi(midi: number): InstrumentPosition[] {
+  const positions: InstrumentPosition[] = [];
+  for (const string of INSTRUMENT_STRINGS) {
+    for (let finger = 0; finger < INSTRUMENT_FINGER_SEMITONES.length; finger += 1) {
+      if (string.openMidi + INSTRUMENT_FINGER_SEMITONES[finger] === midi) {
+        positions.push({
+          stringId: string.id,
+          stringLabel: string.label,
+          finger,
+        });
+      }
+    }
+  }
+  return positions;
+}
+
+function fingerLabel(finger: number): string {
+  return finger === 0 ? "open" : `finger ${finger}`;
 }
 
 function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()): string {
@@ -3550,25 +4626,23 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
       return `
         <div class="practice-pattern-slot sheet-entry-slot ${activeClass}" data-row-index="${rowIndex}" data-slot-index="${index}">
           ${ledgers}
-          <div class="staff-batch-note value-quarter sheet-entry-note practice-pattern-note ${statusClass} ${practiceMode && patternIndex === activePatternIndex ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
+          <div class="staff-batch-note value-quarter sheet-entry-note practice-pattern-note ${statusClass} ${practiceMode && patternIndex === activePatternIndex ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${noteTooltip(slot.midi)}">
             ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
             <div class="staff-batch-note-head"></div>
             <div class="staff-batch-note-stem"></div>
           </div>
           ${playedNoteHtml}
           <div class="sheet-entry-slot-label">${index + 1}</div>
-          <div class="sheet-entry-note-label ${practiceMode ? statusClass : ""}">${playedLabel}</div>
+          <div class="sheet-entry-note-label ${practiceMode ? statusClass : ""}" title="${noteTooltip(slot.midi)}">${playedLabel}</div>
         </div>
       `;
     }).join("");
 
-    const placeholders = Array.from(
-      { length: PRACTICE_PATTERN_NOTES_PER_ROW - rowSlots.length },
-      () => `<div class="practice-pattern-slot sheet-entry-slot placeholder"></div>`,
-    ).join("");
+    const columnCount = Math.max(1, rowSlots.length);
 
     return `
-      <div class="practice-sheet-row" data-row-index="${rowIndex}">
+      <div class="practice-sheet-row has-clef" data-row-index="${rowIndex}">
+        ${renderStaffClef()}
         <div class="practice-sheet-lines">
           <div class="staff-line l1"></div>
           <div class="staff-line l2"></div>
@@ -3576,8 +4650,8 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
           <div class="staff-line l4"></div>
           <div class="staff-line l5"></div>
         </div>
-        <div class="practice-pattern-grid sheet-entry-grid" style="--pattern-cols:${PRACTICE_PATTERN_NOTES_PER_ROW}">
-          ${slots}${placeholders}
+        <div class="practice-pattern-grid sheet-entry-grid" style="--pattern-cols:${columnCount}">
+          ${slots}
         </div>
       </div>
     `;
@@ -3588,6 +4662,110 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
       ${rows}
     </div>
   `;
+}
+
+function renderStaffTuningSheet(nowMs = performance.now()): string {
+  void nowMs;
+  resizeTuningSlots(tuningStringCount);
+  const targets = tuningTargets();
+  const targetIndexBySlot = tuningTargetIndexBySlot();
+  const rowCount = Math.max(1, Math.ceil(tuningStringCount / TUNING_TARGETS_PER_ROW));
+  const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
+    const startIndex = rowIndex * TUNING_TARGETS_PER_ROW;
+    const rowSlots = tuningSlots.slice(startIndex, startIndex + TUNING_TARGETS_PER_ROW);
+    const slots = rowSlots.map((slot, localIndex) => {
+      const index = startIndex + localIndex;
+      const targetIndex = targetIndexBySlot.get(index) ?? null;
+      const result = targetIndex !== null ? tuningResults[targetIndex] : null;
+      const isActive =
+        targetIndex !== null &&
+        targetIndex === tuningTargetCursor &&
+        tuningPhase !== "idle" &&
+        tuningPhase !== "complete";
+      const status = result?.status ?? "pending";
+      const centsText = result?.cents === null || result?.cents === undefined
+        ? ""
+        : `${formatSigned(result.cents)}c`;
+
+      if (!slot) {
+        return `
+          <div class="practice-pattern-slot tuning-slot sheet-entry-slot empty ${isActive ? "active-slot" : ""}" data-row-index="${rowIndex}" data-slot-index="${index}">
+            <div class="sheet-entry-slot-label">${index + 1}</div>
+          </div>
+        `;
+      }
+
+      const y = midiToStaffY(slot.naturalMidi);
+      const stemDirection = stemDirectionForMidi(slot.naturalMidi);
+      const ledgers = ledgerLineYs(slot.naturalMidi)
+        .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
+        .join("");
+      const accidental = accidentalSymbol(slot.accidental);
+      const label = formatSheetEntrySlot(slot);
+      const statusClass = `status-${status}`;
+
+      return `
+        <div class="practice-pattern-slot tuning-slot sheet-entry-slot ${isActive ? "active active-slot" : ""}" data-row-index="${rowIndex}" data-slot-index="${index}">
+          ${ledgers}
+          <div class="staff-batch-note value-quarter sheet-entry-note tuning-note practice-pattern-note ${statusClass} ${isActive ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${noteTooltip(slot.midi)}">
+            ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
+            <div class="staff-batch-note-head"></div>
+            <div class="staff-batch-note-stem"></div>
+          </div>
+          <div class="sheet-entry-slot-label">String ${index + 1}</div>
+          <div class="sheet-entry-note-label ${statusClass}" title="${noteTooltip(slot.midi)}">${label}${centsText ? ` · ${centsText}` : ""}</div>
+        </div>
+      `;
+    }).join("");
+
+    const columnCount = Math.max(1, rowSlots.length);
+
+    return `
+      <div class="practice-sheet-row tuning-row has-clef" data-row-index="${rowIndex}">
+        ${renderStaffClef()}
+        <div class="practice-sheet-lines">
+          <div class="staff-line l1"></div>
+          <div class="staff-line l2"></div>
+          <div class="staff-line l3"></div>
+          <div class="staff-line l4"></div>
+          <div class="staff-line l5"></div>
+        </div>
+        <div class="practice-pattern-grid sheet-entry-grid tuning-grid" style="--pattern-cols:${columnCount}">
+          ${slots}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  const completeClass = tuningPhase === "complete" ? "complete" : "";
+  return `
+    <div class="practice-sheet tuning-sheet ${completeClass}" style="--practice-row-count:${rowCount}">
+      ${rows}
+    </div>
+  `;
+}
+
+function scrollTuningSheetToActiveRow(): void {
+  if (!ui || state.mode !== "tuning") {
+    return;
+  }
+  const activeSlot = ui.staff.querySelector<HTMLElement>(".tuning-slot.active-slot");
+  if (!activeSlot) {
+    return;
+  }
+  const rowIndex = parseInt(activeSlot.dataset.rowIndex ?? "-1", 10);
+  if (!Number.isFinite(rowIndex) || rowIndex === practicePatternLastScrolledRow) {
+    return;
+  }
+  practicePatternLastScrolledRow = rowIndex;
+  const row = ui.staff.querySelector<HTMLElement>(`.practice-sheet-row[data-row-index="${rowIndex}"]`);
+  if (!row) {
+    return;
+  }
+  ui.staff.scrollTo({
+    top: Math.max(0, row.offsetTop - 12),
+    behavior: "smooth",
+  });
 }
 
 function renderSheetEntrySummary(): string {
@@ -3618,7 +4796,7 @@ function renderSheetEntrySummary(): string {
   ].join("\n");
 }
 
-function handleStaffSheetEntryClick(event: MouseEvent): void {
+function handleStaffSheetEntryClick(event: MouseEvent | PointerEvent): void {
   if (!ui || !isSheetEntryEditable()) {
     return;
   }
@@ -3627,15 +4805,24 @@ function handleStaffSheetEntryClick(event: MouseEvent): void {
     stopPracticePatternPlayback(true);
   }
 
-  const row = sheetEntryRowForClientY(event.clientY);
+  const clickedSlot = (event.target as Element | null)?.closest<HTMLElement>(
+    ".sheet-entry-slot[data-slot-index]",
+  ) ?? null;
+  const row = clickedSlot?.closest<HTMLElement>(".practice-sheet-row") ?? sheetEntryRowForClientY(event.clientY);
   const rect = row?.getBoundingClientRect() ?? ui.staff.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0 || !row) {
     return;
   }
 
-  const x = clamp(event.clientX - rect.left, 0, rect.width - 0.001);
   const rowIndex = parseInt(row.dataset.rowIndex ?? "0", 10);
-  const localIndex = Math.floor((x / rect.width) * PRACTICE_PATTERN_NOTES_PER_ROW);
+  const rowSlotCount = Math.min(
+    PRACTICE_PATTERN_NOTES_PER_ROW,
+    sheetEntrySlotCount - rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW,
+  );
+  const x = clamp(event.clientX - rect.left, 0, rect.width - 0.001);
+  const localIndex = clickedSlot
+    ? parseInt(clickedSlot.dataset.slotIndex ?? "0", 10) - rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW
+    : Math.floor((x / rect.width) * Math.max(1, rowSlotCount));
   const slotIndex = clamp(
     rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW + localIndex,
     0,
@@ -3658,6 +4845,70 @@ function handleStaffSheetEntryClick(event: MouseEvent): void {
   };
   syncPatternEntryPracticeResults();
   scheduleRender();
+}
+
+function handleTuningSheetClick(event: MouseEvent | PointerEvent): void {
+  if (!ui || state.mode !== "tuning") {
+    return;
+  }
+
+  clearTuningAdvanceTimer();
+  const clickedSlot = (event.target as Element | null)?.closest<HTMLElement>(
+    ".tuning-slot[data-slot-index]",
+  ) ?? null;
+  const row = clickedSlot?.closest<HTMLElement>(".practice-sheet-row") ?? tuningRowForClientY(event.clientY);
+  const rect = row?.getBoundingClientRect() ?? ui.staff.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0 || !row) {
+    return;
+  }
+
+  const rowIndex = parseInt(row.dataset.rowIndex ?? "0", 10);
+  const rowSlotCount = Math.min(
+    TUNING_TARGETS_PER_ROW,
+    tuningStringCount - rowIndex * TUNING_TARGETS_PER_ROW,
+  );
+  const x = clamp(event.clientX - rect.left, 0, rect.width - 0.001);
+  const localIndex = clickedSlot
+    ? parseInt(clickedSlot.dataset.slotIndex ?? "0", 10) - rowIndex * TUNING_TARGETS_PER_ROW
+    : Math.floor((x / rect.width) * Math.max(1, rowSlotCount));
+  const slotIndex = clamp(
+    rowIndex * TUNING_TARGETS_PER_ROW + localIndex,
+    0,
+    tuningStringCount - 1,
+  );
+
+  if (tuningEntryTool === "rest") {
+    tuningSlots[slotIndex] = null;
+    resetTuningSession();
+    scheduleRender();
+    return;
+  }
+
+  const y = clamp(event.clientY - rect.top, 0, rect.height);
+  const naturalMidi = staffYToNearestNaturalMidi(y);
+  const midi = naturalMidi + accidentalOffset(tuningEntryTool);
+  tuningSlots[slotIndex] = {
+    naturalMidi,
+    accidental: tuningEntryTool,
+    midi: clamp(midi, 0, 127),
+  };
+  resetTuningSession();
+  tuningTargetCursor = tuningTargetIndexBySlot().get(slotIndex) ?? 0;
+  scheduleRender();
+}
+
+function tuningRowForClientY(clientY: number): HTMLElement | null {
+  if (!ui) {
+    return null;
+  }
+  const rows = Array.from(ui.staff.querySelectorAll<HTMLElement>(".tuning-row"));
+  if (rows.length === 0) {
+    return null;
+  }
+  return rows.find((row) => {
+    const rect = row.getBoundingClientRect();
+    return clientY >= rect.top && clientY <= rect.bottom;
+  }) ?? rows[rows.length - 1] ?? null;
 }
 
 function sheetEntryRowForClientY(clientY: number): HTMLElement | null {
@@ -3689,6 +4940,24 @@ function resizeSheetEntrySlots(nextCount: number): void {
   }
   sheetEntrySlots = nextSlots;
   sheetEntrySlotCount = normalizedCount;
+}
+
+function resizeTuningSlots(nextCount: number): void {
+  const normalizedCount = clamp(Math.round(nextCount), 1, 8);
+  if (tuningSlots.length === normalizedCount) {
+    return;
+  }
+  const nextSlots = createEmptySheetSlots(normalizedCount);
+  for (let i = 0; i < Math.min(tuningSlots.length, normalizedCount); i += 1) {
+    nextSlots[i] = tuningSlots[i];
+  }
+  for (let i = 0; i < normalizedCount; i += 1) {
+    if (!nextSlots[i] && INSTRUMENT_STRINGS[i]) {
+      nextSlots[i] = sheetEntrySlotFromMidi(INSTRUMENT_STRINGS[i].openMidi);
+    }
+  }
+  tuningSlots = nextSlots;
+  tuningStringCount = normalizedCount;
 }
 
 function createEmptySheetSlots(count: number): Array<SheetEntrySlot | null> {
@@ -3784,6 +5053,21 @@ function sheetEntryPatternIndexBySlot(): Map<number, number> {
   return map;
 }
 
+function tuningTargets(): TuningTarget[] {
+  resizeTuningSlots(tuningStringCount);
+  return tuningSlots
+    .map((slot, slotIndex) => (slot ? { slotIndex, stringIndex: slotIndex, slot } : null))
+    .filter((target): target is TuningTarget => target !== null);
+}
+
+function tuningTargetIndexBySlot(): Map<number, number> {
+  const map = new Map<number, number>();
+  tuningTargets().forEach((target, targetIndex) => {
+    map.set(target.slotIndex, targetIndex);
+  });
+  return map;
+}
+
 function syncPatternEntryPracticeResults(): void {
   if (!isPatternEntrySelected()) {
     return;
@@ -3791,6 +5075,7 @@ function syncPatternEntryPracticeResults(): void {
   practicePatternResults = createPracticePatternResults();
   practicePatternPassSummary = null;
   practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+  resetPracticeAnalysis();
 }
 
 function isPatternEntrySelected(): boolean {
@@ -3827,6 +5112,22 @@ function naturalMidiNameParts(midi: number): { letter: string; octave: number } 
   return {
     letter: letterByPitchClass[pitchClass] ?? "C",
     octave,
+  };
+}
+
+function sheetEntrySlotFromMidi(midi: number): SheetEntrySlot {
+  const pitchClass = ((midi % 12) + 12) % 12;
+  if ([0, 2, 4, 5, 7, 9, 11].includes(pitchClass)) {
+    return {
+      naturalMidi: midi,
+      accidental: "natural",
+      midi,
+    };
+  }
+  return {
+    naturalMidi: midi - 1,
+    accidental: "sharp",
+    midi,
   };
 }
 
