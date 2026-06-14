@@ -1140,27 +1140,39 @@ button.primary {
 }
 
 .practice-analysis-wrong-note {
-  z-index: 4;
-}
-
-.practice-analysis-wrong-note .staff-batch-note-head,
-.practice-analysis-wrong-note .staff-batch-note-stem {
-  background: #b00020;
-}
-
-.practice-analysis-count {
   position: absolute;
-  left: 26px;
-  top: -0.5rem;
-  min-width: 1rem;
-  padding: 0.02rem 0.18rem;
+  left: 50%;
+  z-index: 4;
+  width: var(--dot-size, 12px);
+  height: var(--dot-size, 12px);
+  border: 1px solid rgba(255, 254, 249, 0.92);
   border-radius: 999px;
-  color: #ffffff;
   background: #b00020;
-  font-size: 0.62rem;
+  box-shadow: 0 0 0 1px rgba(176, 0, 32, 0.22);
+  transform: translate(-50%, -50%);
+}
+
+.analysis-slot .practice-pattern-target {
+  bottom: 34px;
+}
+
+.analysis-slot .practice-pattern-played {
+  bottom: 20px;
+}
+
+.practice-analysis-errors {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  color: #b00020;
+  font-size: 0.56rem;
   font-weight: 700;
-  line-height: 1rem;
+  line-height: 1.05;
   text-align: center;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
 }
 
 .practice-debug-empty {
@@ -1341,8 +1353,9 @@ button.primary {
 }
 
 .staff.practice-sheet-active {
-  height: min(56dvh, 500px);
-  min-height: 300px;
+  height: auto;
+  max-height: min(56dvh, 500px);
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
@@ -1487,7 +1500,7 @@ button.primary {
 .staff.practice-sheet-active .staff-batch-layer {
   position: relative;
   inset: auto;
-  min-height: 100%;
+  min-height: 0;
   pointer-events: auto;
 }
 
@@ -1519,13 +1532,13 @@ button.primary {
 .practice-sheet {
   position: relative;
   display: grid;
-  gap: 0.5rem;
-  padding: 0.48rem 0.55rem 0.65rem;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem 0.45rem;
 }
 
 .practice-sheet-row {
   position: relative;
-  min-height: 292px;
+  min-height: 270px;
   border: 1px solid rgba(120, 101, 75, 0.16);
   border-radius: 8px;
   background: #fffef9;
@@ -1534,14 +1547,16 @@ button.primary {
 
 .practice-sheet-clef {
   position: absolute;
-  left: 0.34rem;
-  top: 50px;
+  left: 0.18rem;
+  top: 6px;
   z-index: 4;
-  width: 2rem;
-  color: #1f2f2a;
-  font-size: 3.55rem;
-  line-height: 0.9;
+  width: 4.65rem;
+  height: 12.35rem;
   pointer-events: none;
+}
+
+.practice-sheet-clef path {
+  fill: #1f2f2a;
 }
 
 .practice-sheet-lines {
@@ -1550,17 +1565,13 @@ button.primary {
   pointer-events: none;
 }
 
-.practice-sheet-row.has-clef .practice-sheet-lines {
-  left: 2.45rem;
-}
-
 .practice-sheet-row .practice-pattern-grid {
   position: absolute;
   inset: 0;
 }
 
 .practice-sheet-row.has-clef .practice-pattern-grid {
-  left: 2.45rem;
+  left: 4.35rem;
 }
 
 .sheet-entry-slot {
@@ -1625,7 +1636,7 @@ button.primary {
 }
 
 .sheet-entry-note-label {
-  bottom: 0.4rem;
+  bottom: 0.32rem;
   color: #1f2f2a;
   font-size: 0.66rem;
   font-weight: 700;
@@ -1660,7 +1671,7 @@ button.primary {
 .practice-pattern-note {
   transform: translate(-50%, -50%) scale(1);
   transform-origin: center;
-  transition: transform 110ms ease, filter 110ms ease;
+  transition: filter 110ms ease;
 }
 
 .practice-pattern-note.active {

@@ -112,6 +112,7 @@ type PracticePatternResult = {
   status: "pending" | "correct" | "wrong";
   playedMidi: number | null;
   bleedMidi: number | null;
+  revealed: boolean;
 };
 
 type InstrumentStringSetup = {
@@ -218,6 +219,9 @@ type TuningResult = {
 };
 
 const PATTERN_ENTRY_ID = "pattern-entry";
+const STAFF_BOTTOM_LINE_STEP = 30;
+const MAX_SHEET_ENTRY_BARS = 16;
+const MAX_SHEET_ENTRY_SLOTS = 256;
 
 const PRACTICE_PATTERNS: PracticePattern[] = [
   {
@@ -255,6 +259,19 @@ const PRACTICE_PATTERNS: PracticePattern[] = [
       ...makeWarmupGroup(62, "Re", 2),
       ...makeWarmupGroup(57, "La", 2),
     ],
+  },
+  {
+    id: "line-walk",
+    name: "Line Walk",
+    defaultLoop: true,
+    defaultLoopMode: "back-and-forth",
+    defaultCountInBeats: 4,
+    tempoRamp: {
+      initialBpm: 40,
+      stepBpm: 10,
+      maxBpm: 140,
+    },
+    notes: makeStaffStepRun(STAFF_BOTTOM_LINE_STEP - 4, STAFF_BOTTOM_LINE_STEP + 10),
   },
   {
     id: PATTERN_ENTRY_ID,
@@ -326,7 +343,7 @@ let practicePatternLoopEnabled = PRACTICE_PATTERNS[0].defaultLoop;
 let practicePatternLoopMode = PRACTICE_PATTERNS[0].defaultLoopMode;
 let practicePatternCountInBeats = PRACTICE_PATTERNS[0].defaultCountInBeats;
 let practicePatternTempoRamp = createPracticePatternTempoRamp(PRACTICE_PATTERNS[0]);
-let practiceTimingCorrectionEnabled = true;
+let practiceTimingCorrectionEnabled = false;
 let practicePatternPlaying = false;
 let practicePatternStartedAtMs = 0;
 let practicePatternPassStartedAtMs = 0;
@@ -484,6 +501,13 @@ type UiRefs = {
 
 let ui: UiRefs | null = null;
 let lastSheetEntryPointerHandledAtMs = 0;
+let lastSheetEntryClick:
+  | {
+      slotIndex: number;
+      hadNoteBefore: boolean;
+      tMs: number;
+    }
+  | null = null;
 
 function mountUi(): void {
   appRoot.innerHTML = `
@@ -569,7 +593,7 @@ function mountUi(): void {
                 <input id="practice-bleed-sensitivity" type="number" min="0.01" max="0.95" step="0.01" value="0.90" />
               </label>
               <label class="practice-timing-correction" for="practice-timing-correction">
-                <input id="practice-timing-correction" type="checkbox" checked />
+                <input id="practice-timing-correction" type="checkbox" />
                 Timing
               </label>
               <label>Correction
@@ -707,7 +731,7 @@ function mountUi(): void {
               </select>
             </label>
             <label>Bars
-              <input id="note-entry-bars" type="number" min="1" max="4" step="1" value="1" />
+              <input id="note-entry-bars" type="number" min="1" max="${MAX_SHEET_ENTRY_BARS}" step="1" value="1" />
             </label>
             <label>Click tool
               <select id="note-entry-tool">
@@ -1120,7 +1144,7 @@ function mountUi(): void {
 
   noteEntryBarsInput.addEventListener("change", (event) => {
     const target = event.target as HTMLInputElement;
-    sheetEntryBars = clamp(parseInt(target.value || "1", 10), 1, 4);
+    sheetEntryBars = clamp(parseInt(target.value || "1", 10), 1, MAX_SHEET_ENTRY_BARS);
     target.value = String(sheetEntryBars);
     syncSheetEntryTiming();
     syncPatternEntryPracticeResults();
@@ -1204,6 +1228,9 @@ function mountUi(): void {
     }
     event.preventDefault();
     lastSheetEntryPointerHandledAtMs = performance.now();
+    if (event.detail >= 2 && removeSheetEntrySlotFromDoubleClick(event)) {
+      return;
+    }
     handleStaffSheetEntryClick(event);
   });
 
@@ -1960,7 +1987,7 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   capturePracticePatternBleedFrame(frame);
 
   const playedMidi =
-    state.live.displayedMidi ?? state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
+    state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
   if (playedMidi === null) {
     return;
   }
@@ -1991,21 +2018,16 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
 
   const isCorrect = playedMidi === target.midi;
   recordPracticeAnalysisPlayed(position, assignmentStepIndex, noteIndex, playedMidi, frame.tMs);
-  if (result.status === "pending" || (result.status === "wrong" && result.playedMidi === null)) {
+  if (result.status === "pending") {
     result.status = isCorrect ? "correct" : "wrong";
     result.playedMidi = playedMidi;
   }
 }
 
 function markElapsedPracticePatternSteps(position: PracticePatternPosition): void {
-  const correctionWindowMs = practicePatternTimingCorrectionWindowMs();
-  const activeStepIndex =
-    practiceTimingCorrectionEnabled && position.stepElapsedMs < correctionWindowMs
-      ? position.stepIndex - 1
-      : position.stepIndex;
   markElapsedPracticePatternOrder(
     position.order,
-    activeStepIndex,
+    position.stepIndex,
     position.passStartStepIndex,
   );
 }
@@ -2130,7 +2152,7 @@ function practicePatternAssignmentStepIndex(
     if (!target || !result || target.midi !== playedMidi) {
       continue;
     }
-    if (result.status === "pending" || (result.status === "wrong" && result.playedMidi === null)) {
+    if (result.status === "pending") {
       return stepIndex;
     }
   }
@@ -2153,6 +2175,9 @@ function markElapsedPracticePatternOrder(
     if (result && result.status === "pending") {
       result.status = "wrong";
       result.playedMidi = null;
+    }
+    if (result) {
+      result.revealed = true;
     }
   }
 }
@@ -3051,12 +3076,12 @@ function renderPracticeAnalysis(): string {
   const delays = practiceAnalysisSteps
     .map((step) => step.delayMs)
     .filter((delay): delay is number => delay !== null && Number.isFinite(delay));
-  const wrongTotal = practiceAnalysisSteps.reduce(
-    (sum, step) => sum + [...step.wrongCounts.values()].reduce((inner, count) => inner + count, 0),
-    0,
-  );
   const playedCount = practiceAnalysisSteps.filter((step) => step.firstPlayedMidi !== null).length;
   const noteAggregates = practiceAnalysisNoteAggregates();
+  const wrongTotal = noteAggregates.reduce(
+    (sum, aggregate) => sum + wrongCountTotal(aggregate.wrongCounts),
+    0,
+  );
   const meanDelay = delays.length === 0
     ? null
     : delays.reduce((sum, delay) => sum + delay, 0) / delays.length;
@@ -3112,6 +3137,9 @@ function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
       aggregate.delayMsValues.push(step.delayMs);
     }
     for (const [wrongMidi, count] of step.wrongCounts.entries()) {
+      if (!isPracticeAnalysisWrongNote(step.targetMidi, wrongMidi)) {
+        continue;
+      }
       aggregate.wrongCounts.set(
         wrongMidi,
         (aggregate.wrongCounts.get(wrongMidi) ?? 0) + count,
@@ -3124,6 +3152,10 @@ function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
 
 function wrongCountTotal(counts: Map<number, number>): number {
   return [...counts.values()].reduce((sum, count) => sum + count, 0);
+}
+
+function isPracticeAnalysisWrongNote(targetMidi: number, playedMidi: number): boolean {
+  return playedMidi !== targetMidi && midiToStaffY(playedMidi) !== midiToStaffY(targetMidi);
 }
 
 function renderPracticeDelayHistogram(delays: number[]): string {
@@ -3195,19 +3227,25 @@ function renderPracticePitchAnalysisSheet(noteAggregates: PracticeAnalysisNoteAg
 
 function renderPracticeAnalysisSlot(aggregate: PracticeAnalysisNoteAggregate, rowIndex: number): string {
   const y = midiToStaffY(aggregate.targetMidi);
+  const totalErrors = wrongCountTotal(aggregate.wrongCounts);
   const ledgers = ledgerLineYs(aggregate.targetMidi)
     .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
     .join("");
   const stemDirection = stemDirectionForMidi(aggregate.targetMidi);
   const wrongNotes = [...aggregate.wrongCounts.entries()]
     .sort(([a], [b]) => b - a)
-    .map(([midi, count], offsetIndex) => renderPracticeAnalysisWrongNote(midi, count, offsetIndex))
+    .map(([midi, count]) =>
+      renderPracticeAnalysisWrongNote(midi, count, Math.max(1, wrongCountTotal(aggregate.wrongCounts))),
+    )
     .join("");
   const meanDelay = aggregate.delayMsValues.length === 0
     ? null
     : aggregate.delayMsValues.reduce((sum, delay) => sum + delay, 0) / aggregate.delayMsValues.length;
   const delay = meanDelay === null ? "" : `${formatSigned(meanDelay)} ms avg`;
   const label = `${midiToScientific(aggregate.targetMidi)} | ${midiToSolfege(aggregate.targetMidi)} | ${instrumentPositionText(aggregate.targetMidi)}`;
+  const errorText = totalErrors === 0
+    ? ""
+    : `${totalErrors} error${totalErrors === 1 ? "" : "s"}`;
 
   return `
     <div class="practice-pattern-slot analysis-slot" data-row-index="${rowIndex}">
@@ -3219,22 +3257,19 @@ function renderPracticeAnalysisSlot(aggregate: PracticeAnalysisNoteAggregate, ro
       ${wrongNotes}
       <div class="practice-pattern-target" title="${label}">${midiToScientific(aggregate.targetMidi)}</div>
       <div class="practice-pattern-played">${aggregate.heardCount}/${aggregate.expectedCount} · ${delay || "-"}</div>
+      <div class="practice-analysis-errors">${errorText}</div>
     </div>
   `;
 }
 
-function renderPracticeAnalysisWrongNote(midi: number, count: number, offsetIndex: number): string {
+function renderPracticeAnalysisWrongNote(midi: number, count: number, maxCount: number): string {
   const y = midiToStaffY(midi);
-  const stemDirection = stemDirectionForMidi(midi);
   const label = `${midiToScientific(midi)} | ${midiToSolfege(midi)} | ${instrumentPositionText(midi)}`;
-  const xOffset = (offsetIndex % 3) * 9 - 9;
+  const ratio = count / Math.max(1, maxCount);
+  const size = 8 + ratio * 18;
 
   return `
-    <div class="staff-batch-note value-quarter practice-analysis-wrong-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px; margin-left:${xOffset}px;" title="Played ${label}">
-      <div class="staff-batch-note-head"></div>
-      <div class="staff-batch-note-stem"></div>
-      ${count > 1 ? `<span class="practice-analysis-count">${count}</span>` : ""}
-    </div>
+    <div class="practice-analysis-wrong-note" style="top:${y.toFixed(1)}px; --dot-size:${size.toFixed(1)}px;" title="Played ${label} ${count} time${count === 1 ? "" : "s"}"></div>
   `;
 }
 
@@ -4438,7 +4473,7 @@ function renderStaffPracticePattern(nowMs: number): string {
     const notes = pattern.notes.slice(startIndex, startIndex + PRACTICE_PATTERN_NOTES_PER_ROW);
     const slots = notes.map((note, localIndex) => {
       const index = startIndex + localIndex;
-      const result = practicePatternResults[index] ?? { status: "pending", playedMidi: null };
+      const result = visiblePracticePatternResult(practicePatternResults[index]);
       const y = midiToStaffY(note.midi);
       const ledgers = ledgerLineYs(note.midi)
         .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
@@ -4535,8 +4570,26 @@ function renderPracticePlayedNote(midi: number): string {
   `;
 }
 
+function visiblePracticePatternResult(result: PracticePatternResult | undefined): PracticePatternResult {
+  if (!result || !result.revealed) {
+    return {
+      status: "pending",
+      playedMidi: null,
+      bleedMidi: null,
+      revealed: false,
+    };
+  }
+  return result;
+}
+
 function renderStaffClef(): string {
-  return `<div class="practice-sheet-clef" aria-hidden="true">𝄞</div>`;
+  return `
+    <svg class="practice-sheet-clef" viewBox="0 0 711 1732" aria-hidden="true" focusable="false">
+      <g transform="translate(0 1334) scale(1 -1)">
+        <path d="M314 801Q300 854 291.0 906.0Q282 958 282 1012Q282 1059 288.5 1100.5Q295 1142 307 1177Q320 1217 341.0 1252.5Q362 1288 385.5 1311.0Q409 1334 427 1334Q451 1334 493 1249Q514 1206 524.0 1156.0Q534 1106 534 1049Q534 978 515.0 907.5Q496 837 459.5 775.0Q423 713 372 666L407 498Q422 500 432.0 501.0Q442 502 447 502Q508 502 556.0 467.5Q604 433 632.5 377.0Q661 321 661 254Q661 177 621.5 115.5Q582 54 503 25Q508 8 532 -117Q538 -147 541.0 -164.5Q544 -182 545.0 -195.0Q546 -208 546 -225Q546 -275 521.5 -314.5Q497 -354 455.5 -376.0Q414 -398 363 -398Q311 -398 271.0 -378.5Q231 -359 208.0 -324.5Q185 -290 185 -245Q185 -197 211.5 -165.0Q238 -133 287 -133Q329 -133 355.5 -163.5Q382 -194 382 -236Q382 -272 357.0 -299.0Q332 -326 292 -326H282Q308 -365 364 -365Q433 -365 472.0 -320.0Q511 -275 511 -205Q511 -188 507.0 -159.5Q503 -131 493 -91Q483 -51 477.5 -25.0Q472 1 470 12Q436 2 390 2Q304 2 222 52Q142 102 96.0 184.0Q50 266 50 361Q50 451 91 530Q132 609 192.5 675.0Q253 741 314 801ZM341 826Q364 838 390.0 870.5Q416 903 440.0 945.0Q464 987 479.0 1029.5Q494 1072 494 1106Q494 1142 483.0 1163.0Q472 1184 445 1184Q421 1184 398.5 1162.0Q376 1140 358.5 1103.5Q341 1067 331.0 1022.0Q321 977 321 930Q321 898 327.5 872.0Q334 846 341 826ZM398 379Q371 373 347.0 353.5Q323 334 308.5 306.5Q294 279 294 248Q294 223 307.0 196.5Q320 170 339 154Q352 142 365 136Q380 129 380 123Q380 120 370 117Q332 126 301.5 151.0Q271 176 253.5 211.5Q236 247 236 287Q236 330 253.5 370.0Q271 410 302.5 442.0Q334 474 374 490L345 641Q229 547 174.5 456.5Q120 366 120 277Q120 212 154.0 156.0Q188 100 247.0 65.5Q306 31 380 31Q400 31 420.5 35.0Q441 39 464 45ZM495 55Q593 97 593 227Q593 270 571.0 305.5Q549 341 512.0 362.0Q475 383 429 383Z"></path>
+      </g>
+    </svg>
+  `;
 }
 
 function noteTooltip(midi: number): string {
@@ -4591,7 +4644,7 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
     const slots = rowSlots.map((slot, localIndex) => {
       const index = startIndex + localIndex;
       const patternIndex = patternIndexBySlot.get(index) ?? null;
-      const result = patternIndex !== null ? practicePatternResults[patternIndex] : null;
+      const result = patternIndex !== null ? visiblePracticePatternResult(practicePatternResults[patternIndex]) : null;
       const status = practiceMode && result ? result.status : "pending";
       const activeClass = practiceMode && activePatternIndex !== null && patternIndex === activePatternIndex
         ? "active active-slot"
@@ -4828,6 +4881,11 @@ function handleStaffSheetEntryClick(event: MouseEvent | PointerEvent): void {
     0,
     sheetEntrySlotCount - 1,
   );
+  lastSheetEntryClick = {
+    slotIndex,
+    hadNoteBefore: sheetEntrySlots[slotIndex] !== null,
+    tMs: performance.now(),
+  };
   if (sheetEntryTool === "rest") {
     sheetEntrySlots[slotIndex] = null;
     syncPatternEntryPracticeResults();
@@ -4845,6 +4903,39 @@ function handleStaffSheetEntryClick(event: MouseEvent | PointerEvent): void {
   };
   syncPatternEntryPracticeResults();
   scheduleRender();
+}
+
+function removeSheetEntrySlotFromDoubleClick(event: MouseEvent | PointerEvent): boolean {
+  if (!ui || !isSheetEntryEditable() || !lastSheetEntryClick) {
+    return false;
+  }
+
+  const clickedSlot = (event.target as Element | null)?.closest<HTMLElement>(
+    ".sheet-entry-slot[data-slot-index]",
+  ) ?? null;
+  if (!clickedSlot) {
+    return false;
+  }
+
+  const slotIndex = parseInt(clickedSlot.dataset.slotIndex ?? "-1", 10);
+  const nowMs = performance.now();
+  if (
+    !Number.isFinite(slotIndex) ||
+    slotIndex !== lastSheetEntryClick.slotIndex ||
+    !lastSheetEntryClick.hadNoteBefore ||
+    nowMs - lastSheetEntryClick.tMs > 700
+  ) {
+    return false;
+  }
+
+  if (state.mode === "practice") {
+    stopPracticePatternPlayback(true);
+  }
+  sheetEntrySlots[slotIndex] = null;
+  lastSheetEntryClick = null;
+  syncPatternEntryPracticeResults();
+  scheduleRender();
+  return true;
 }
 
 function handleTuningSheetClick(event: MouseEvent | PointerEvent): void {
@@ -4930,7 +5021,7 @@ function isSheetEntryEditable(): boolean {
 }
 
 function resizeSheetEntrySlots(nextCount: number): void {
-  const normalizedCount = clamp(Math.round(nextCount), 1, 64);
+  const normalizedCount = clamp(Math.round(nextCount), 1, MAX_SHEET_ENTRY_SLOTS);
   if (sheetEntrySlots.length === normalizedCount) {
     return;
   }
@@ -4961,7 +5052,7 @@ function resizeTuningSlots(nextCount: number): void {
 }
 
 function createEmptySheetSlots(count: number): Array<SheetEntrySlot | null> {
-  return Array.from({ length: clamp(Math.round(count), 1, 64) }, () => null);
+  return Array.from({ length: clamp(Math.round(count), 1, MAX_SHEET_ENTRY_SLOTS) }, () => null);
 }
 
 function defaultSheetSlotCount(
@@ -4969,7 +5060,7 @@ function defaultSheetSlotCount(
   slotValue: SheetEntrySlotValue,
   bars: number,
 ): number {
-  return clamp(sheetEntrySlotsPerBar(timeSignature, slotValue) * bars, 1, 64);
+  return clamp(sheetEntrySlotsPerBar(timeSignature, slotValue) * bars, 1, MAX_SHEET_ENTRY_SLOTS);
 }
 
 function syncSheetEntryTiming(): void {
@@ -5477,6 +5568,19 @@ function makeWarmupGroup(
   return Array.from({ length: repeatCount }, () => ({ midi, label }));
 }
 
+function makeStaffStepRun(startStep: number, endStep: number): PracticePatternNote[] {
+  const direction = startStep <= endStep ? 1 : -1;
+  const length = Math.abs(endStep - startStep) + 1;
+
+  return Array.from({ length }, (_, index) => {
+    const midi = diatonicStepToNaturalMidi(startStep + index * direction);
+    return {
+      midi,
+      label: midiToSolfege(midi),
+    };
+  });
+}
+
 function practicePatternById(id: string): PracticePattern {
   return PRACTICE_PATTERNS.find((pattern) => pattern.id === id) ?? PRACTICE_PATTERNS[0];
 }
@@ -5497,6 +5601,7 @@ function createPracticePatternResults(): PracticePatternResult[] {
     status: "pending",
     playedMidi: null,
     bleedMidi: null,
+    revealed: false,
   }));
 }
 
