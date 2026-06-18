@@ -1,6 +1,21 @@
 import { startMic, stopMic, type MicHandle } from "./audio/mic";
+import type {
+  BasicPitchAnalysisFrame,
+  BasicPitchPitchDetection,
+} from "./audio/basic-pitch-estimator";
 import { startPitchPipeline, type PipelineHandle } from "./audio/pipeline";
 import {
+  checkBackendAvailability,
+  DEFAULT_BACKEND_ENDPOINT,
+  startBackendPitchPipeline,
+} from "./audio/backend-pipeline";
+import {
+  checkBasicPitchBackendAvailability,
+  DEFAULT_BASIC_PITCH_BACKEND_ENDPOINT,
+  startBasicPitchBackendPipeline,
+} from "./audio/basic-pitch-backend-pipeline";
+import {
+  type PitchDetectionEngine,
   type PitchFrame,
   type SpectrumFrame,
   type TempoFrame,
@@ -17,6 +32,19 @@ import {
   renderSpectrumSummary,
 } from "./modes/spectrum-mode";
 import {
+  PATTERN_ENTRY_ID,
+  PRACTICE_PATTERNS,
+  type PracticePattern,
+  type PracticePatternLoopMode,
+  type PracticePatternNote,
+} from "./features/practice/patterns";
+import {
+  deletePracticePattern,
+  fetchSavedPracticePatterns,
+  localPatternStorageAllowed,
+  savePracticePattern,
+} from "./features/practice/pattern-storage";
+import {
   midiToScientific,
   midiToSolfege,
 } from "./notation/solfege";
@@ -29,19 +57,87 @@ import {
   type StemDirection,
 } from "./notation/staff-placeholder";
 import { createInitialState } from "./state/store";
+import {
+  DEFAULT_INSTRUMENT_STRINGS,
+  INSTRUMENT_FINGER_SEMITONES,
+  instrumentStringLabel,
+  instrumentStringOpenMidi,
+  instrumentStringSolfege,
+  type InstrumentStringId,
+} from "./shared/instrument-profile";
+import { midiToFrequency } from "./shared/music";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app root");
 const appRoot = app;
 
 type SequenceSubMode = "single-beat" | "phrase";
+type AudioProcessingMode = "browser" | "local-backend";
 type BeatUnit = "half" | "quarter" | "eighth";
 type BeatStatus = "On Time" | "Short" | "Long";
-type BeatValue = "whole" | "half" | "quarter" | "eighth";
-type PracticePatternLoopMode = "restart" | "back-and-forth";
+type BeatValue = "whole" | "half" | "quarter" | "eighth" | "sixteenth";
 type SheetEntryAccidental = "natural" | "sharp" | "flat";
 type SheetEntryTool = SheetEntryAccidental | "rest";
 type SheetEntrySlotValue = "quarter" | "eighth" | "sixteenth";
+type SheetPlaybackInstrument = "violin" | "piano";
+
+type SheetPlaybackStep = {
+  midi: number | null;
+  durationBeats: number;
+};
+
+type BasicPitchProbeState = {
+  analysis: BasicPitchAnalysisFrame | null;
+  detections: BasicPitchProbeDetection[];
+  lastDetectionAbsMs: number;
+  gridStartMs: number | null;
+};
+
+type BasicPitchProbeDetection = BasicPitchPitchDetection & {
+  absMs: number;
+  analysisMs: number;
+};
+
+type BasicPitchProbeSlot = {
+  index: number;
+  startMs: number;
+  endMs: number;
+  midi: number | null;
+  midiFloat: number | null;
+  freqHz: number | null;
+  confidence: number;
+  detectionCount: number;
+};
+
+type BasicPitchProbeSymbol = {
+  kind: "note" | "rest";
+  startSlot: number;
+  slotCount: number;
+  value: BeatValue;
+  midi: number | null;
+  midiFloat: number | null;
+  freqHz: number | null;
+  confidence: number;
+  score: number;
+  evidenceSlots: number;
+};
+
+type BasicPitchProbeSegmentCandidate = BasicPitchProbeSymbol & {
+  endSlot: number;
+};
+
+type BasicPitchProbeSegmentationNode = {
+  score: number;
+  symbols: BasicPitchProbeSymbol[];
+};
+
+type BasicPitchProbeBar = {
+  slots: BasicPitchProbeSlot[];
+  symbols: BasicPitchProbeSymbol[];
+  activeSlot: number;
+  sixteenthMs: number;
+  patternLabel: string;
+};
 
 type BeatSymbol = {
   kind: "note" | "rest";
@@ -89,40 +185,17 @@ type BeatBatch = {
   status: BeatStatus;
 };
 
-type PracticePatternNote = {
-  midi: number;
-  label: string;
-};
-
-type PracticePattern = {
-  id: string;
-  name: string;
-  defaultLoop: boolean;
-  defaultLoopMode: PracticePatternLoopMode;
-  defaultCountInBeats: number;
-  tempoRamp?: {
-    initialBpm: number;
-    stepBpm: number;
-    maxBpm: number;
-  };
-  notes: PracticePatternNote[];
-};
-
 type PracticePatternResult = {
   status: "pending" | "correct" | "wrong";
   playedMidi: number | null;
   bleedMidi: number | null;
   revealed: boolean;
-};
-
-type InstrumentStringSetup = {
-  id: string;
-  label: string;
-  openMidi: number;
+  correctMs: number;
+  lastFrameMs: number | null;
 };
 
 type InstrumentPosition = {
-  stringId: string;
+  stringId: InstrumentStringId;
   stringLabel: string;
   finger: number;
 };
@@ -161,7 +234,7 @@ type PracticePatternPassSummary = {
   tempoLabel: string;
   bleedDetected: boolean;
   bleedFrameRatio: number;
-  bleedString: string | null;
+  bleedString: InstrumentStringId | null;
 };
 
 type PracticePatternPassAccumulator = {
@@ -169,7 +242,7 @@ type PracticePatternPassAccumulator = {
   tempoSamples: number;
   frameCount: number;
   bleedFrameCount: number;
-  bleedStringCounts: Map<string, number>;
+  bleedStringCounts: Map<InstrumentStringId, number>;
 };
 
 type PracticePatternTempoRamp = {
@@ -185,6 +258,7 @@ type PracticePatternPosition = {
   cycleIndex: number;
   cycleKey: number;
   stepElapsedMs: number;
+  noteDurationMs: number;
   cycleElapsedMs: number;
   order: number[];
 };
@@ -215,78 +289,11 @@ type TuningResult = {
   verified: boolean;
   bleedFrameCount: number;
   bleedMaxRatio: number;
-  bleedStringCounts: Map<string, number>;
+  bleedStringCounts: Map<InstrumentStringId, number>;
 };
 
-const PATTERN_ENTRY_ID = "pattern-entry";
-const STAFF_BOTTOM_LINE_STEP = 30;
 const MAX_SHEET_ENTRY_BARS = 16;
 const MAX_SHEET_ENTRY_SLOTS = 256;
-
-const PRACTICE_PATTERNS: PracticePattern[] = [
-  {
-    id: "warmup1",
-    name: "Warmup 1",
-    defaultLoop: true,
-    defaultLoopMode: "back-and-forth",
-    defaultCountInBeats: 4,
-    tempoRamp: {
-      initialBpm: 40,
-      stepBpm: 10,
-      maxBpm: 140,
-    },
-    notes: [
-      ...makeWarmupGroup(74, "Re"),
-      ...makeWarmupGroup(69, "La"),
-      ...makeWarmupGroup(62, "Re"),
-      ...makeWarmupGroup(57, "La"),
-    ],
-  },
-  {
-    id: "warmup2",
-    name: "Warmup 2",
-    defaultLoop: true,
-    defaultLoopMode: "back-and-forth",
-    defaultCountInBeats: 4,
-    tempoRamp: {
-      initialBpm: 40,
-      stepBpm: 10,
-      maxBpm: 140,
-    },
-    notes: [
-      ...makeWarmupGroup(74, "Re", 2),
-      ...makeWarmupGroup(69, "La", 2),
-      ...makeWarmupGroup(62, "Re", 2),
-      ...makeWarmupGroup(57, "La", 2),
-    ],
-  },
-  {
-    id: "line-walk",
-    name: "Line Walk",
-    defaultLoop: true,
-    defaultLoopMode: "back-and-forth",
-    defaultCountInBeats: 4,
-    tempoRamp: {
-      initialBpm: 40,
-      stepBpm: 10,
-      maxBpm: 140,
-    },
-    notes: makeStaffStepRun(STAFF_BOTTOM_LINE_STEP - 4, STAFF_BOTTOM_LINE_STEP + 10),
-  },
-  {
-    id: PATTERN_ENTRY_ID,
-    name: "Pattern Entry",
-    defaultLoop: true,
-    defaultLoopMode: "restart",
-    defaultCountInBeats: 4,
-    tempoRamp: {
-      initialBpm: 40,
-      stepBpm: 0,
-      maxBpm: 140,
-    },
-    notes: [],
-  },
-];
 
 const state = createInitialState();
 const sequenceSettings = initialSequenceSettings();
@@ -294,6 +301,7 @@ const liveSettings = initialLiveSettings();
 const liveTracker = new LiveNoteTracker(liveSettings, 30_000);
 const collector = new SequenceCollector(sequenceSettings);
 state.practice.targetBpm = sequenceSettings.bpm;
+const FIXED_PRACTICE_PATTERN_IDS = new Set(PRACTICE_PATTERNS.slice(0, 3).map((pattern) => pattern.id));
 
 const TRAIL_DURATION_MS = 1400;
 const TRAIL_START_LEFT_PCT = 58;
@@ -308,13 +316,17 @@ const TUNING_READY_HOLD_MS = 900;
 const TUNING_DEFAULT_TOLERANCE_CENTS = 8;
 const TUNING_WRONG_NOTE_CENTS = 650;
 const TUNING_BLEED_REPORT_THRESHOLD = 0.12;
-const INSTRUMENT_STRINGS: InstrumentStringSetup[] = [
-  { id: "s1", label: "S1", openMidi: 74 },
-  { id: "s2", label: "S2", openMidi: 69 },
-  { id: "s3", label: "S3", openMidi: 62 },
-  { id: "s4", label: "S4", openMidi: 57 },
-];
-const INSTRUMENT_FINGER_SEMITONES = [0, 2, 4, 5, 7] as const;
+const AI_PROBE_SHEET_Y_OFFSET = 160;
+const AI_PROBE_SLOTS_PER_BAR = 16;
+const AI_PROBE_NOTE_CONFIDENCE_FLOOR = 0.28;
+const AI_PROBE_NOTE_MIN_DETECTIONS = 2;
+const AI_PROBE_CLUSTER_RELATIVE_FLOOR = 0.45;
+const AI_PROBE_SEGMENT_DURATIONS = [16, 8, 4, 2, 1] as const;
+const AI_PROBE_REST_CONFIDENCE_PENALTY = 0.65;
+const AI_PROBE_NOTE_MISSING_SLOT_PENALTY = 0.42;
+const AI_PROBE_NOTE_MISMATCH_PENALTY = 1.25;
+const AI_PROBE_SEGMENT_COUNT_PENALTY = 0.18;
+const INSTRUMENT_STRINGS = DEFAULT_INSTRUMENT_STRINGS;
 
 let micHandle: MicHandle | null = null;
 let pipeline: PipelineHandle | null = null;
@@ -323,10 +335,20 @@ let lastTempoFrame: TempoFrame | null = null;
 let spectrogram: LiveSpectrogramRenderer | null = null;
 let renderPending = false;
 let showExactIntonation = false;
+let showBasicPitchProbeDiagnostics = false;
 let enableFadeTrail = true;
 let enableVisualMetronome = true;
 let enableMetronomeSound = false;
 let enableStringPurityCheck = false;
+let audioProcessingMode: AudioProcessingMode = "browser";
+let audioProcessingStatus = "Browser processing";
+let practicePitchEngine: PitchDetectionEngine = "autocorrelation";
+const basicPitchProbe: BasicPitchProbeState = {
+  analysis: null,
+  detections: [],
+  lastDetectionAbsMs: Number.NEGATIVE_INFINITY,
+  gridStartMs: null,
+};
 let minBleedScore = 0.14;
 const PRACTICE_BLEED_MIN = 0.01;
 const PRACTICE_BLEED_MAX = 0.95;
@@ -338,6 +360,7 @@ let practicePeakMergeTouched = false;
 let practiceTolerancePct = 8;
 let showPracticeDebug = false;
 let practiceCorrectionSource: TempoResponsivenessLabel = "Balanced";
+let practicePatterns: PracticePattern[] = [...PRACTICE_PATTERNS];
 let selectedPracticePatternId = PRACTICE_PATTERNS[0].id;
 let practicePatternLoopEnabled = PRACTICE_PATTERNS[0].defaultLoop;
 let practicePatternLoopMode = PRACTICE_PATTERNS[0].defaultLoopMode;
@@ -377,6 +400,11 @@ let practicePatternPassAccumulator = createPracticePatternPassAccumulator();
 let practiceAnalysisSteps: PracticeAnalysisStep[] = [];
 let practiceAnalysisStepMap = new Map<string, PracticeAnalysisStep>();
 let showPracticeAnalysis = false;
+let practicePatternStorageAvailable = false;
+let practicePatternStorageStatus = localPatternStorageAllowed()
+  ? "Checking local saves"
+  : "Local app required";
+let practicePatternManagementBusy = false;
 sequenceSettings.bpm = practicePatternTempoRamp.initialBpm;
 state.practice.targetBpm = sequenceSettings.bpm;
 let sequenceSubMode: SequenceSubMode = "single-beat";
@@ -399,6 +427,13 @@ let metronomeStartMs = performance.now();
 let metronomeRafId: number | null = null;
 let metronomeLastTickIndex: number | null = null;
 let metronomeAudioContext: AudioContext | null = null;
+let sheetPlaybackInstrument: SheetPlaybackInstrument = "violin";
+let sheetPlaybackPlaying = false;
+let sheetPlaybackStopTimer: number | null = null;
+let activeSheetPlayback: {
+  gain: GainNode;
+  sources: AudioScheduledSourceNode[];
+} | null = null;
 const isLikelyIOS = detectLikelyIOS();
 
 type NoteSnapshot = {
@@ -418,6 +453,11 @@ const trailNotes: TrailNote[] = [];
 type UiRefs = {
   listenBtn: HTMLButtonElement;
   modeSelect: HTMLSelectElement;
+  audioProcessingSelect: HTMLSelectElement;
+  audioProcessingStatus: HTMLSpanElement;
+  sheetPlaybackControls: HTMLDivElement;
+  sheetPlaybackInstrumentSelect: HTMLSelectElement;
+  sheetPlaybackBtn: HTMLButtonElement;
   recordBtn: HTMLButtonElement;
   outputTitle: HTMLHeadingElement;
   liveMetronomeControls: HTMLDivElement;
@@ -431,14 +471,17 @@ type UiRefs = {
   practicePatternLoopModeSelect: HTMLSelectElement;
   practicePatternName: HTMLElement;
   practicePatternPlayBtn: HTMLButtonElement;
+  practicePatternManageBtn: HTMLButtonElement;
   practiceAnalysisBtn: HTMLButtonElement;
   practicePatternReadout: HTMLSpanElement;
+  practicePatternStorageStatus: HTMLSpanElement;
   practiceRampStartInput: HTMLInputElement;
   practiceRampStepInput: HTMLInputElement;
   practiceRampMaxInput: HTMLInputElement;
   practiceToleranceInput: HTMLInputElement;
   practiceSensitivityInput: HTMLInputElement;
   practiceBleedSensitivityInput: HTMLInputElement;
+  practicePitchEngineSelect: HTMLSelectElement;
   practiceTimingCorrectionToggle: HTMLInputElement;
   practiceCorrectionSourceSelect: HTMLSelectElement;
   practiceDebugToggle: HTMLInputElement;
@@ -522,7 +565,24 @@ function mountUi(): void {
           <option value="sequence">Sequence</option>
           <option value="sheet-entry">Sheet Entry</option>
           <option value="spectrum">Spectrum</option>
+          <option value="ai-probe">AI Probe</option>
         </select>
+        <label class="audio-processing-control">Audio
+          <select id="audio-processing-select" aria-label="Audio processing">
+            <option value="browser" selected>Browser</option>
+            <option value="local-backend">Local backend</option>
+          </select>
+          <span id="audio-processing-status" class="audio-processing-status">Browser processing</span>
+        </label>
+        <div id="sheet-playback-controls" class="sheet-playback-controls">
+          <label>Sound
+            <select id="sheet-playback-instrument" aria-label="Sheet playback instrument">
+              <option value="violin" selected>Violin</option>
+              <option value="piano">Piano</option>
+            </select>
+          </label>
+          <button id="sheet-playback-btn" type="button" class="sheet-playback-btn" aria-label="Play sheet">▶ Sheet</button>
+        </div>
         <label id="practice-top-bpm" class="top-bpm-control">Target BPM
           <span class="live-bpm-stepper">
             <input id="live-bpm-input" class="live-bpm-input" type="number" min="30" max="240" step="1" value="40" />
@@ -531,6 +591,12 @@ function mountUi(): void {
               <button id="live-bpm-down" type="button" class="live-bpm-arrow" aria-label="Decrease live BPM">▼</button>
             </span>
           </span>
+        </label>
+        <label id="practice-top-pitch" class="top-pitch-control">Pitch
+          <select id="practice-pitch-engine" aria-label="Practice pitch estimation engine">
+            <option value="autocorrelation" selected>Current</option>
+            <option value="basic-pitch">AI</option>
+          </select>
         </label>
         <span id="capture-hint" class="muted mode-hint"></span>
         <button id="record-btn" disabled>Start Capture</button>
@@ -612,9 +678,6 @@ function mountUi(): void {
           <div id="practice-panel" class="practice-panel">
             <div class="practice-pattern-controls">
               <select id="practice-pattern-select" class="practice-pattern-select" aria-label="Practice pattern">
-                ${PRACTICE_PATTERNS.map(
-                  (pattern) => `<option value="${pattern.id}">${pattern.name}</option>`,
-                ).join("")}
               </select>
               <label class="practice-pattern-loop" for="practice-pattern-loop">
                 <input id="practice-pattern-loop" type="checkbox" checked />
@@ -638,10 +701,12 @@ function mountUi(): void {
                 </label>
               </div>
               <button id="practice-pattern-play" type="button" class="practice-pattern-play" aria-label="Start Warmup 1">▶</button>
+              <button id="practice-pattern-manage" type="button" class="practice-pattern-manage" disabled>Save</button>
               <button id="practice-analysis-btn" type="button" class="practice-analysis-btn" disabled>Analyze</button>
               <div class="practice-pattern-copy">
                 <strong id="practice-pattern-name">Warmup 1</strong>
                 <span id="practice-pattern-readout">Ready</span>
+                <span id="practice-pattern-storage-status" class="practice-pattern-storage-status">Checking local saves</span>
               </div>
             </div>
             <p id="practice-detail" class="practice-detail">Confidence 0% | rhythmic signal 0%</p>
@@ -775,6 +840,11 @@ function mountUi(): void {
 
   const listenBtn = appRoot.querySelector<HTMLButtonElement>("#listen-btn");
   const modeSelect = appRoot.querySelector<HTMLSelectElement>("#mode-select");
+  const audioProcessingSelect = appRoot.querySelector<HTMLSelectElement>("#audio-processing-select");
+  const audioProcessingStatus = appRoot.querySelector<HTMLSpanElement>("#audio-processing-status");
+  const sheetPlaybackControls = appRoot.querySelector<HTMLDivElement>("#sheet-playback-controls");
+  const sheetPlaybackInstrumentSelect = appRoot.querySelector<HTMLSelectElement>("#sheet-playback-instrument");
+  const sheetPlaybackBtn = appRoot.querySelector<HTMLButtonElement>("#sheet-playback-btn");
   const recordBtn = appRoot.querySelector<HTMLButtonElement>("#record-btn");
   const outputTitle = appRoot.querySelector<HTMLHeadingElement>("#output-title");
   const liveMetronomeControls = appRoot.querySelector<HTMLDivElement>("#live-metronome-controls");
@@ -788,14 +858,17 @@ function mountUi(): void {
   const practicePatternLoopModeSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pattern-loop-mode");
   const practicePatternName = appRoot.querySelector<HTMLElement>("#practice-pattern-name");
   const practicePatternPlayBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-play");
+  const practicePatternManageBtn = appRoot.querySelector<HTMLButtonElement>("#practice-pattern-manage");
   const practiceAnalysisBtn = appRoot.querySelector<HTMLButtonElement>("#practice-analysis-btn");
   const practicePatternReadout = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-readout");
+  const practicePatternStorageStatus = appRoot.querySelector<HTMLSpanElement>("#practice-pattern-storage-status");
   const practiceRampStartInput = appRoot.querySelector<HTMLInputElement>("#practice-ramp-start");
   const practiceRampStepInput = appRoot.querySelector<HTMLInputElement>("#practice-ramp-step");
   const practiceRampMaxInput = appRoot.querySelector<HTMLInputElement>("#practice-ramp-max");
   const practiceToleranceInput = appRoot.querySelector<HTMLInputElement>("#practice-tolerance");
   const practiceSensitivityInput = appRoot.querySelector<HTMLInputElement>("#practice-sensitivity");
   const practiceBleedSensitivityInput = appRoot.querySelector<HTMLInputElement>("#practice-bleed-sensitivity");
+  const practicePitchEngineSelect = appRoot.querySelector<HTMLSelectElement>("#practice-pitch-engine");
   const practiceTimingCorrectionToggle = appRoot.querySelector<HTMLInputElement>("#practice-timing-correction");
   const practiceCorrectionSourceSelect = appRoot.querySelector<HTMLSelectElement>("#practice-correction-source");
   const practiceDebugToggle = appRoot.querySelector<HTMLInputElement>("#practice-debug-toggle");
@@ -858,6 +931,11 @@ function mountUi(): void {
   if (
     !listenBtn ||
     !modeSelect ||
+    !audioProcessingSelect ||
+    !audioProcessingStatus ||
+    !sheetPlaybackControls ||
+    !sheetPlaybackInstrumentSelect ||
+    !sheetPlaybackBtn ||
     !recordBtn ||
     !outputTitle ||
     !liveMetronomeControls ||
@@ -871,14 +949,17 @@ function mountUi(): void {
     !practicePatternLoopModeSelect ||
     !practicePatternName ||
     !practicePatternPlayBtn ||
+    !practicePatternManageBtn ||
     !practiceAnalysisBtn ||
     !practicePatternReadout ||
+    !practicePatternStorageStatus ||
     !practiceRampStartInput ||
     !practiceRampStepInput ||
     !practiceRampMaxInput ||
     !practiceToleranceInput ||
     !practiceSensitivityInput ||
     !practiceBleedSensitivityInput ||
+    !practicePitchEngineSelect ||
     !practiceTimingCorrectionToggle ||
     !practiceCorrectionSourceSelect ||
     !practiceDebugToggle ||
@@ -944,6 +1025,11 @@ function mountUi(): void {
   ui = {
     listenBtn,
     modeSelect,
+    audioProcessingSelect,
+    audioProcessingStatus,
+    sheetPlaybackControls,
+    sheetPlaybackInstrumentSelect,
+    sheetPlaybackBtn,
     recordBtn,
     outputTitle,
     liveMetronomeControls,
@@ -957,14 +1043,17 @@ function mountUi(): void {
     practicePatternLoopModeSelect,
     practicePatternName,
     practicePatternPlayBtn,
+    practicePatternManageBtn,
     practiceAnalysisBtn,
     practicePatternReadout,
+    practicePatternStorageStatus,
     practiceRampStartInput,
     practiceRampStepInput,
     practiceRampMaxInput,
     practiceToleranceInput,
     practiceSensitivityInput,
     practiceBleedSensitivityInput,
+    practicePitchEngineSelect,
     practiceTimingCorrectionToggle,
     practiceCorrectionSourceSelect,
     practiceDebugToggle,
@@ -1032,12 +1121,41 @@ function mountUi(): void {
 
   modeSelect.addEventListener("change", onModeChange);
 
+  audioProcessingSelect.addEventListener("change", (event) => {
+    void onAudioProcessingModeChange(event);
+  });
+
+  sheetPlaybackInstrumentSelect.addEventListener("change", (event) => {
+    const target = event.target as HTMLSelectElement;
+    sheetPlaybackInstrument = asSheetPlaybackInstrument(target.value);
+    if (sheetPlaybackPlaying) {
+      stopSheetPlayback(true);
+    }
+    scheduleRender();
+  });
+
+  sheetPlaybackBtn.addEventListener("click", () => {
+    void onToggleSheetPlayback();
+  });
+
+  sequenceSummary.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLButtonElement && target.id === "ai-probe-clear") {
+      clearBasicPitchProbe();
+      scheduleRender();
+    }
+  });
+
   recordBtn.addEventListener("click", () => {
     void onToggleRecording();
   });
 
   practicePatternPlayBtn.addEventListener("click", () => {
     void onTogglePracticePatternPlayback();
+  });
+
+  practicePatternManageBtn.addEventListener("click", () => {
+    void onPracticePatternManage();
   });
 
   practiceAnalysisBtn.addEventListener("click", () => {
@@ -1286,6 +1404,32 @@ function mountUi(): void {
     target.value = String(sequenceSettings.bpm);
   });
 
+  sequenceSummary.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.id === "ai-probe-diagnose") {
+      showBasicPitchProbeDiagnostics = target.checked;
+      scheduleRender();
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.id === "ai-probe-bpm") {
+      applyBpmInput(target);
+      target.value = String(sequenceSettings.bpm);
+    }
+  });
+
+  sequenceSummary.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.id !== "ai-probe-bpm") {
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyBpmInput(target);
+      target.value = String(sequenceSettings.bpm);
+      target.blur();
+    }
+  });
+
   const stepLiveBpm = (delta: number): void => {
     const nextBpm = clamp(sequenceSettings.bpm + delta, 30, 240);
     if (nextBpm === sequenceSettings.bpm) {
@@ -1368,6 +1512,10 @@ function mountUi(): void {
       : PRACTICE_BLEED_DEFAULT;
     target.value = practiceBleedSensitivity.toFixed(2);
     scheduleRender();
+  });
+
+  practicePitchEngineSelect.addEventListener("change", (event) => {
+    void onPracticePitchEngineChange(event);
   });
 
   practiceCorrectionSourceSelect.addEventListener("change", (event) => {
@@ -1509,12 +1657,37 @@ function render(): void {
   const solfege = displayedMidi !== null ? midiToSolfege(displayedMidi) : "-";
   const scientific = displayedMidi !== null ? midiToScientific(displayedMidi) : "-";
   const stringPurityActive = isStringPurityActive();
+  const aiProbeActive = state.mode === "ai-probe";
   appRoot.dataset.mode = state.mode;
 
   ui.listenBtn.textContent = state.listening ? "Stop Listening" : "Start Listening";
   ui.listenBtn.style.display =
     state.mode === "sequence" || state.mode === "sheet-entry" ? "none" : "";
   ui.modeSelect.value = state.mode;
+  ui.audioProcessingSelect.value = audioProcessingMode;
+  ui.audioProcessingSelect.disabled = state.recording;
+  ui.audioProcessingStatus.textContent = audioProcessingStatus;
+  ui.audioProcessingStatus.classList.toggle(
+    "is-error",
+    audioProcessingStatus.toLowerCase().includes("unavailable") ||
+      audioProcessingStatus.toLowerCase().includes("failed"),
+  );
+  const sheetPlaybackVisible = isSheetPlaybackMode();
+  const sheetPlaybackSteps = currentSheetPlaybackSteps();
+  const sheetPlaybackHasNotes = sheetPlaybackSteps.some((step) => step.midi !== null);
+  ui.sheetPlaybackControls.style.display = sheetPlaybackVisible ? "inline-flex" : "none";
+  ui.sheetPlaybackInstrumentSelect.value = sheetPlaybackInstrument;
+  ui.sheetPlaybackBtn.disabled = sheetPlaybackVisible && !sheetPlaybackPlaying
+    ? !sheetPlaybackHasNotes
+    : true;
+  ui.sheetPlaybackBtn.textContent = sheetPlaybackPlaying ? "■ Stop" : "▶ Sheet";
+  ui.sheetPlaybackBtn.setAttribute(
+    "aria-label",
+    sheetPlaybackPlaying
+      ? "Stop sheet playback"
+      : `Play sheet with ${sheetPlaybackInstrument}`,
+  );
+  ui.sheetPlaybackBtn.classList.toggle("playing", sheetPlaybackPlaying);
   ui.recordBtn.disabled = state.mode !== "sequence";
   ui.recordBtn.style.display = state.mode === "sequence" ? "" : "none";
   ui.liveMetronomeControls.style.display = state.mode === "practice" ? "grid" : "none";
@@ -1528,6 +1701,8 @@ function render(): void {
   ui.outputTitle.textContent =
     state.mode === "spectrum"
       ? "Spectrum Output"
+      : aiProbeActive
+        ? "Basic Pitch Probe"
       : state.mode === "practice"
         ? ""
         : state.mode === "tuning"
@@ -1578,6 +1753,7 @@ function render(): void {
     ui.practiceRampMaxInput.value = String(practicePatternTempoRamp.maxBpm);
   }
   ui.practiceTimingCorrectionToggle.checked = practiceTimingCorrectionEnabled;
+  ui.practicePitchEngineSelect.value = practicePitchEngine;
   ui.practiceCorrectionSourceSelect.value = practiceCorrectionSource;
   ui.practiceDebugToggle.checked = showPracticeDebug;
   ui.practiceDebugSection.style.display = showPracticeDebug ? "block" : "none";
@@ -1603,7 +1779,8 @@ function render(): void {
     ui.bleedThresholdInput.value = minBleedScore.toFixed(2);
   }
   ui.stringPurityToggle.checked = stringPurityActive;
-  ui.stringPurityToggle.disabled = state.mode === "spectrum";
+  ui.stringPurityToggle.disabled =
+    state.mode === "spectrum" || aiProbeActive || isPracticeAiPitchActive();
   ui.exactToggle.checked = showExactIntonation;
   ui.trailToggle.checked = enableFadeTrail;
   ui.staff.classList.toggle(
@@ -1717,7 +1894,11 @@ function render(): void {
     previousDisplayedSnapshot = null;
   }
 
-  const showMetronome = enableVisualMetronome && state.mode !== "spectrum" && state.mode !== "tuning";
+  const showMetronome =
+    enableVisualMetronome &&
+    state.mode !== "spectrum" &&
+    state.mode !== "tuning" &&
+    !aiProbeActive;
   ui.metronomeBox.style.display = showMetronome ? "block" : "none";
   if (showMetronome) {
     ui.metronomeBox.innerHTML = renderVisualMetronome(performance.now());
@@ -1730,6 +1911,15 @@ function render(): void {
     ui.beatBatchBox.innerHTML = "";
     ui.sequenceMeta.textContent = "Live spectrum | log frequency scale | fixed-do reference labels";
     ui.sequenceSummary.textContent = renderSpectrumSummary(lastFrame, minBleedScore);
+  } else if (aiProbeActive) {
+    ui.beatBatchBox.style.display = "none";
+    ui.beatBatchBox.innerHTML = "";
+    ui.sequenceMeta.textContent = renderBasicPitchProbeMeta();
+    if (isBasicPitchProbeBpmFocused() && ui.sequenceSummary.querySelector("#ai-probe-bpm")) {
+      updateBasicPitchProbeDynamicSections();
+    } else {
+      ui.sequenceSummary.innerHTML = renderBasicPitchProbeSummary();
+    }
   } else if (state.mode === "tuning") {
     ui.beatBatchBox.style.display = "none";
     ui.beatBatchBox.innerHTML = "";
@@ -1766,9 +1956,686 @@ function render(): void {
     }
   }
 
-  if (fadingBeatBatches.length > 0 || practicePatternPlaying) {
+  if (fadingBeatBatches.length > 0 || practicePatternPlaying || (state.mode === "ai-probe" && state.listening)) {
     scheduleRender();
   }
+}
+
+function renderBasicPitchProbeMeta(): string {
+  const analysis = basicPitchProbe.analysis;
+  if (!state.listening) {
+    return `Basic Pitch probe | ${basicPitchProbe.detections.length} raw pitch detections`;
+  }
+  if (!analysis) {
+    return `Basic Pitch probe | buffering roughly 2.4 seconds | ${basicPitchProbe.detections.length} raw pitch detections`;
+  }
+  return `Basic Pitch probe | ${analysis.windowSeconds.toFixed(2)}s window | ${analysis.profile.totalAnalysisMs.toFixed(0)} ms total | ${analysis.profile.evaluateModelMs.toFixed(0)} ms TFJS/evaluate | ${analysis.pitchDetections.length} raw detections in latest window | ${basicPitchProbe.detections.length} shown`;
+}
+
+function isBasicPitchProbeBpmFocused(): boolean {
+  const activeElement = document.activeElement;
+  return activeElement instanceof HTMLInputElement && activeElement.id === "ai-probe-bpm";
+}
+
+function updateBasicPitchProbeDynamicSections(): void {
+  if (!ui) {
+    return;
+  }
+  const profile = ui.sequenceSummary.querySelector<HTMLElement>(".ai-probe-profile");
+  if (profile) {
+    profile.outerHTML = renderBasicPitchProbeProfile();
+  }
+  const notation = ui.sequenceSummary.querySelector<HTMLElement>(".ai-probe-notation");
+  if (notation) {
+    notation.outerHTML = renderBasicPitchProbeNotationSheet();
+  }
+  const tempoGrid = ui.sequenceSummary.querySelector<HTMLElement>(".ai-probe-tempo");
+  if (tempoGrid) {
+    tempoGrid.outerHTML = renderBasicPitchProbeTempoGrid();
+  }
+}
+
+function renderBasicPitchProbeSummary(): string {
+  const diagnostics = showBasicPitchProbeDiagnostics ? renderBasicPitchProbeDiagnostics() : "";
+  const diagnoseChecked = showBasicPitchProbeDiagnostics ? "checked" : "";
+  const detectionCount = basicPitchProbe.detections.length;
+  const detectionLabel = `${detectionCount} raw detection${detectionCount === 1 ? "" : "s"}`;
+  const diagnosticsLabel = showBasicPitchProbeDiagnostics ? "diagnostics shown" : "diagnostics hidden";
+  return `
+    <div class="ai-probe-panel">
+      <div class="ai-probe-controls">
+        <button id="ai-probe-clear" type="button">Clear</button>
+        <label for="ai-probe-bpm">BPM
+          <input id="ai-probe-bpm" type="number" min="30" max="240" step="1" value="${sequenceSettings.bpm}" />
+        </label>
+        <label class="ai-probe-diagnose" for="ai-probe-diagnose">
+          <input id="ai-probe-diagnose" type="checkbox" ${diagnoseChecked} />
+          Diagnose
+        </label>
+        <span>4/4 bar | AI note sheet | ${detectionLabel} | ${diagnosticsLabel}</span>
+      </div>
+      ${renderBasicPitchProbeNotationSheet()}
+      ${renderBasicPitchProbeTempoGrid()}
+      ${diagnostics}
+    </div>
+  `;
+}
+
+function renderBasicPitchProbeDiagnostics(): string {
+  const rows = basicPitchProbe.detections
+    .slice()
+    .reverse()
+    .map(renderBasicPitchProbeDetectionRow)
+    .join("");
+  const emptyText = state.listening
+    ? "Waiting for Basic Pitch contour peaks."
+    : "Start listening to collect raw Basic Pitch pitch detections.";
+  return `
+    <div class="ai-probe-diagnostics">
+      ${renderBasicPitchProbeProfile()}
+      ${renderBasicPitchProbeSheet()}
+      ${
+        rows
+          ? `<div class="ai-probe-table" role="table" aria-label="Basic Pitch raw pitch detections">
+              <div class="ai-probe-table-head" role="row">
+                <span>Time ms</span>
+                <span>MIDI</span>
+                <span>Hz</span>
+                <span>Cents</span>
+                <span>Conf</span>
+                <span>Frame</span>
+                <span>Bin</span>
+              </div>
+              ${rows}
+            </div>`
+          : `<div class="ai-probe-empty">${emptyText}</div>`
+      }
+    </div>
+  `;
+}
+
+function renderBasicPitchProbeProfile(): string {
+  const analysis = basicPitchProbe.analysis;
+  if (!analysis) {
+    return `
+      <div class="ai-probe-profile">
+        <strong>Profiler</strong>
+        <span>Waiting for the first Basic Pitch run.</span>
+      </div>
+    `;
+  }
+
+  const profile = analysis.profile;
+  const stages = [
+    ["Audio callback copy", profile.audioTapCopyMs],
+    ["Append/RMS/ring write", profile.appendMs],
+    ["Copy analysis window", profile.latestSamplesMs],
+    ["Resample to 22.05 kHz", profile.resampleMs],
+    ["Model load wait", profile.modelLoadWaitMs],
+    ["TFJS prepare input", profile.tfPrepareMs],
+    ["TFJS contour execute", profile.graphExecuteMs],
+    ["TFJS unwrap contour", profile.tensorUnwrapMs],
+    ["Contour tensor to JS", profile.tensorToArrayMs],
+    ["Contour callback copy", profile.contourCallbackMs],
+    ["Contour peak scan", profile.contourPostprocessMs],
+    ["Frame select", profile.frameSelectMs],
+  ] as const;
+  const bottleneck = stages.reduce((best, stage) => (stage[1] > best[1] ? stage : best));
+  const rows = stages
+    .map(
+      ([label, ms]) => `
+        <div class="ai-probe-profile-row ${label === bottleneck[0] ? "bottleneck" : ""}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${formatMs(ms)}</strong>
+        </div>
+      `,
+    )
+    .join("");
+  const audioInterval =
+    profile.audioTapIntervalMs === null ? "first callback" : `${formatMs(profile.audioTapIntervalMs)} callback gap`;
+
+  return `
+    <div class="ai-probe-profile" aria-label="Basic Pitch performance profile">
+      <div class="ai-probe-profile-head">
+        <strong>Profiler</strong>
+        <span>Bottleneck: ${escapeHtml(bottleneck[0])} (${formatMs(bottleneck[1])})</span>
+      </div>
+      <div class="ai-probe-profile-grid">${rows}</div>
+      <div class="ai-probe-profile-foot">
+        <span>${profile.inputSamples} input samples at ${Math.round(profile.inputSampleRate)} Hz -> ${profile.resampledSamples} samples</span>
+        <span>${profile.contourFrames} contour frames | ${profile.pitchDetections} peaks | ${profile.modelAlreadyLoaded ? "model cached" : "model loaded this run"} | ${audioInterval}</span>
+      </div>
+    </div>
+  `;
+}
+
+function formatMs(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+  if (value < 10) {
+    return `${value.toFixed(2)} ms`;
+  }
+  if (value < 100) {
+    return `${value.toFixed(1)} ms`;
+  }
+  return `${value.toFixed(0)} ms`;
+}
+
+function currentBasicPitchProbeBar(nowMs = performance.now()): BasicPitchProbeBar {
+  const gridStartMs = basicPitchProbe.gridStartMs ?? nowMs;
+  const sixteenthMs = basicPitchProbeSixteenthMs();
+  const barMs = sixteenthMs * AI_PROBE_SLOTS_PER_BAR;
+  const elapsedMs = Math.max(0, nowMs - gridStartMs);
+  const barIndex = Math.floor(elapsedMs / barMs);
+  const barStartMs = gridStartMs + barIndex * barMs;
+  const activeSlot = state.listening
+    ? clamp(Math.floor((nowMs - barStartMs) / sixteenthMs), 0, AI_PROBE_SLOTS_PER_BAR - 1)
+    : -1;
+  const slots = classifyBasicPitchProbeSlots(barStartMs, sixteenthMs);
+  const symbols = segmentBasicPitchProbeBar(slots);
+  const patternLabel = formatBasicPitchProbeBarPattern(symbols);
+  return { slots, symbols, activeSlot, sixteenthMs, patternLabel };
+}
+
+function renderBasicPitchProbeNotationSheet(nowMs = performance.now()): string {
+  const bar = currentBasicPitchProbeBar(nowMs);
+  const beatSlots = basicPitchProbeSymbolsToBeatSlots(bar.symbols, bar.sixteenthMs);
+  const activeLeftPct =
+    bar.activeSlot < 0
+      ? 0
+      : ((bar.activeSlot + 0.5) / AI_PROBE_SLOTS_PER_BAR) * 100;
+  return `
+    <div class="ai-probe-notation" aria-label="Basic Pitch quantized note sheet">
+      <div class="practice-sheet ai-probe-notation-sheet" style="--practice-row-count:1">
+        <div class="practice-sheet-row has-clef ai-probe-notation-row">
+          ${renderStaffClef()}
+          <div class="practice-sheet-lines">
+            <div class="staff-line l1"></div>
+            <div class="staff-line l2"></div>
+            <div class="staff-line l3"></div>
+            <div class="staff-line l4"></div>
+            <div class="staff-line l5"></div>
+          </div>
+          <div class="ai-probe-notation-track">
+            ${renderStaffBeatBatchGrid(beatSlots, "staff-batch-grid current ai-probe-notation-grid", "")}
+            ${bar.activeSlot >= 0 ? `<div class="ai-probe-playhead" style="left:${activeLeftPct.toFixed(3)}%;"></div>` : ""}
+          </div>
+        </div>
+      </div>
+      <div class="ai-probe-pattern">${escapeHtml(bar.patternLabel)}</div>
+    </div>
+  `;
+}
+
+function basicPitchProbeSymbolsToBeatSlots(
+  symbols: BasicPitchProbeSymbol[],
+  sixteenthMs: number,
+): BeatSymbol[][] {
+  const slots: BeatSymbol[][] = Array.from({ length: AI_PROBE_SLOTS_PER_BAR }, () => []);
+  for (const symbol of symbols) {
+    if (symbol.startSlot < 0 || symbol.startSlot >= slots.length) {
+      continue;
+    }
+    slots[symbol.startSlot] = [
+      {
+        kind: symbol.kind,
+        midi: symbol.midi,
+        value: symbol.value,
+        durationMs: symbol.slotCount * sixteenthMs,
+        spanBeats: symbol.slotCount,
+      },
+    ];
+  }
+  return slots;
+}
+
+function renderBasicPitchProbeTempoGrid(nowMs = performance.now()): string {
+  const { slots, symbols, activeSlot, patternLabel } = currentBasicPitchProbeBar(nowMs);
+  const slotHtml = slots.map((slot) => renderBasicPitchProbeSlot(slot, activeSlot)).join("");
+  const symbolHtml = symbols
+    .map((symbol) => renderBasicPitchProbeSymbol(symbol, activeSlot))
+    .join("");
+  const beatHtml = Array.from({ length: 4 }, (_, beatIndex) => {
+    const isActiveBeat =
+      state.listening &&
+      activeSlot >= beatIndex * 4 &&
+      activeSlot < beatIndex * 4 + 4;
+    return `<div class="ai-probe-beat ${isActiveBeat ? "active" : ""}">Beat ${beatIndex + 1}</div>`;
+  }).join("");
+
+  return `
+    <div class="ai-probe-tempo" aria-label="Basic Pitch fixed-tempo note detection">
+      <div class="ai-probe-beats">${beatHtml}</div>
+      <div class="ai-probe-slots">${slotHtml}</div>
+      <div class="ai-probe-pattern">${escapeHtml(patternLabel)}</div>
+      <div class="ai-probe-symbols">${symbolHtml}</div>
+    </div>
+  `;
+}
+
+function basicPitchProbeSixteenthMs(): number {
+  return 60_000 / clamp(sequenceSettings.bpm, 30, 240) / 4;
+}
+
+function classifyBasicPitchProbeSlots(
+  barStartMs: number,
+  sixteenthMs: number,
+): BasicPitchProbeSlot[] {
+  return Array.from({ length: AI_PROBE_SLOTS_PER_BAR }, (_, index) => {
+    const startMs = barStartMs + index * sixteenthMs;
+    const endMs = startMs + sixteenthMs;
+    const detections = basicPitchProbe.detections.filter(
+      (detection) => detection.absMs >= startMs && detection.absMs < endMs,
+    );
+    const pitch = selectBasicPitchProbeSlotPitch(detections);
+    return {
+      index,
+      startMs,
+      endMs,
+      midi: pitch?.midi ?? null,
+      midiFloat: pitch?.midiFloat ?? null,
+      freqHz: pitch?.freqHz ?? null,
+      confidence: pitch?.confidence ?? 0,
+      detectionCount: detections.length,
+    };
+  });
+}
+
+function selectBasicPitchProbeSlotPitch(
+  detections: BasicPitchProbeDetection[],
+): { midi: number; midiFloat: number; freqHz: number; confidence: number } | null {
+  if (detections.length < AI_PROBE_NOTE_MIN_DETECTIONS) {
+    return null;
+  }
+
+  const clusters = new Map<
+    number,
+    { midi: number; count: number; midiSum: number; freqSum: number; confidenceSum: number }
+  >();
+  for (const detection of detections) {
+    const midi = Math.round(detection.midiFloat);
+    const cluster =
+      clusters.get(midi) ??
+      { midi, count: 0, midiSum: 0, freqSum: 0, confidenceSum: 0 };
+    cluster.count += 1;
+    cluster.midiSum += detection.midiFloat;
+    cluster.freqSum += detection.freqHz;
+    cluster.confidenceSum += detection.confidence;
+    clusters.set(midi, cluster);
+  }
+
+  const ranked = Array.from(clusters.values());
+  const maxCount = Math.max(...ranked.map((cluster) => cluster.count));
+  const viable = ranked.filter((cluster) => {
+    const confidence = cluster.confidenceSum / Math.max(1, cluster.count);
+    return (
+      cluster.count >= Math.max(AI_PROBE_NOTE_MIN_DETECTIONS, maxCount * AI_PROBE_CLUSTER_RELATIVE_FLOOR) &&
+      confidence >= AI_PROBE_NOTE_CONFIDENCE_FLOOR
+    );
+  });
+  const candidates = viable.length > 0 ? viable : ranked.filter((cluster) => {
+    const confidence = cluster.confidenceSum / Math.max(1, cluster.count);
+    return cluster.count >= AI_PROBE_NOTE_MIN_DETECTIONS && confidence >= AI_PROBE_NOTE_CONFIDENCE_FLOOR;
+  });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const selected = candidates.sort((a, b) => a.midi - b.midi || b.count - a.count)[0];
+  return {
+    midi: selected.midi,
+    midiFloat: selected.midiSum / selected.count,
+    freqHz: selected.freqSum / selected.count,
+    confidence: selected.confidenceSum / selected.count,
+  };
+}
+
+function segmentBasicPitchProbeBar(slots: BasicPitchProbeSlot[]): BasicPitchProbeSymbol[] {
+  const best: Array<BasicPitchProbeSegmentationNode | null> = Array.from(
+    { length: slots.length + 1 },
+    () => null,
+  );
+  best[slots.length] = { score: 0, symbols: [] };
+
+  for (let startSlot = slots.length - 1; startSlot >= 0; startSlot -= 1) {
+    const candidates = basicPitchProbeSegmentCandidates(slots, startSlot);
+    let bestNode: BasicPitchProbeSegmentationNode | null = null;
+
+    for (const candidate of candidates) {
+      const next = best[candidate.endSlot];
+      if (!next) {
+        continue;
+      }
+      const previousSymbol = next.symbols[0] ?? null;
+      const transitionPenalty = basicPitchProbeTransitionPenalty(candidate, previousSymbol);
+      const score = candidate.score + next.score - transitionPenalty;
+      if (!bestNode || score > bestNode.score) {
+        bestNode = {
+          score,
+          symbols: [candidate, ...next.symbols],
+        };
+      }
+    }
+
+    best[startSlot] = bestNode;
+  }
+
+  return best[0]?.symbols ?? slots.map((slot) => createBasicPitchProbeFallbackSymbol(slot));
+}
+
+function basicPitchProbeSegmentCandidates(
+  slots: BasicPitchProbeSlot[],
+  startSlot: number,
+): BasicPitchProbeSegmentCandidate[] {
+  const candidates: BasicPitchProbeSegmentCandidate[] = [];
+  for (const slotCount of AI_PROBE_SEGMENT_DURATIONS) {
+    if (startSlot + slotCount > slots.length) {
+      continue;
+    }
+    candidates.push(scoreBasicPitchProbeRestSegment(slots, startSlot, slotCount));
+    const noteCandidate = scoreBasicPitchProbeNoteSegment(slots, startSlot, slotCount);
+    if (noteCandidate) {
+      candidates.push(noteCandidate);
+    }
+  }
+  return candidates;
+}
+
+function scoreBasicPitchProbeRestSegment(
+  slots: BasicPitchProbeSlot[],
+  startSlot: number,
+  slotCount: number,
+): BasicPitchProbeSegmentCandidate {
+  const slice = slots.slice(startSlot, startSlot + slotCount);
+  const noteEvidence = slice.reduce((sum, slot) => sum + basicPitchProbeSlotNoteEvidence(slot), 0);
+  const emptySlots = slice.filter((slot) => slot.midi === null).length;
+  const score =
+    emptySlots * 0.55 -
+    noteEvidence * AI_PROBE_REST_CONFIDENCE_PENALTY -
+    AI_PROBE_SEGMENT_COUNT_PENALTY;
+
+  return {
+    kind: "rest",
+    startSlot,
+    endSlot: startSlot + slotCount,
+    slotCount,
+    value: beatValueFromSixteenthCount(slotCount),
+    midi: null,
+    midiFloat: null,
+    freqHz: null,
+    confidence: 0,
+    score,
+    evidenceSlots: emptySlots,
+  };
+}
+
+function scoreBasicPitchProbeNoteSegment(
+  slots: BasicPitchProbeSlot[],
+  startSlot: number,
+  slotCount: number,
+): BasicPitchProbeSegmentCandidate | null {
+  const slice = slots.slice(startSlot, startSlot + slotCount);
+  const midiScores = new Map<number, number>();
+  for (const slot of slice) {
+    if (slot.midi === null) {
+      continue;
+    }
+    midiScores.set(
+      slot.midi,
+      (midiScores.get(slot.midi) ?? 0) + basicPitchProbeSlotNoteEvidence(slot),
+    );
+  }
+  if (midiScores.size === 0) {
+    return null;
+  }
+
+  const midi = Array.from(midiScores.entries()).sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
+  const matchingSlots = slice.filter((slot) => slot.midi === midi);
+  const mismatchedSlots = slice.filter((slot) => slot.midi !== null && slot.midi !== midi);
+  const missingSlots = slice.filter((slot) => slot.midi === null);
+  const evidenceSlots = matchingSlots.length;
+  const coverage = evidenceSlots / slotCount;
+  const evidenceScore = matchingSlots.reduce(
+    (sum, slot) => sum + basicPitchProbeSlotNoteEvidence(slot),
+    0,
+  );
+  const mismatchPenalty = mismatchedSlots.reduce(
+    (sum, slot) => sum + basicPitchProbeSlotNoteEvidence(slot) * AI_PROBE_NOTE_MISMATCH_PENALTY,
+    0,
+  );
+  const missingPenalty = missingSlots.length * AI_PROBE_NOTE_MISSING_SLOT_PENALTY;
+  const durationBonus = Math.log2(slotCount + 1) * 0.22;
+  const startEndBonus =
+    (slice[0]?.midi === midi ? 0.16 : 0) + (slice[slice.length - 1]?.midi === midi ? 0.16 : 0);
+  const score =
+    evidenceScore +
+    coverage * 0.55 +
+    durationBonus +
+    startEndBonus -
+    mismatchPenalty -
+    missingPenalty -
+    AI_PROBE_SEGMENT_COUNT_PENALTY;
+
+  if (coverage < Math.min(0.5, 1 / slotCount) && slotCount > 1) {
+    return null;
+  }
+
+  const weightSum = matchingSlots.reduce((sum, slot) => sum + Math.max(1, slot.detectionCount), 0);
+  const weighted = (value: "midiFloat" | "freqHz" | "confidence"): number =>
+    matchingSlots.reduce(
+      (sum, slot) => sum + (slot[value] ?? 0) * Math.max(1, slot.detectionCount),
+      0,
+    ) / Math.max(1, weightSum);
+
+  return {
+    kind: "note",
+    startSlot,
+    endSlot: startSlot + slotCount,
+    slotCount,
+    value: beatValueFromSixteenthCount(slotCount),
+    midi,
+    midiFloat: weighted("midiFloat"),
+    freqHz: weighted("freqHz"),
+    confidence: weighted("confidence"),
+    score,
+    evidenceSlots,
+  };
+}
+
+function basicPitchProbeTransitionPenalty(
+  current: BasicPitchProbeSegmentCandidate,
+  next: BasicPitchProbeSymbol | null,
+): number {
+  if (!next) {
+    return 0;
+  }
+  if (current.kind === "rest" || next.kind === "rest") {
+    return 0;
+  }
+  if (current.midi === next.midi) {
+    return 0.38;
+  }
+  return 0;
+}
+
+function basicPitchProbeSlotNoteEvidence(slot: BasicPitchProbeSlot): number {
+  if (slot.midi === null) {
+    return 0;
+  }
+  const density = Math.min(1.4, Math.log2(slot.detectionCount + 1) / 2);
+  return Math.max(0.05, slot.confidence) * (0.65 + density);
+}
+
+function createBasicPitchProbeFallbackSymbol(slot: BasicPitchProbeSlot): BasicPitchProbeSymbol {
+  return {
+    kind: slot.midi === null ? "rest" : "note",
+    startSlot: slot.index,
+    slotCount: 1,
+    value: "sixteenth",
+    midi: slot.midi,
+    midiFloat: slot.midiFloat,
+    freqHz: slot.freqHz,
+    confidence: slot.confidence,
+    score: 0,
+    evidenceSlots: slot.midi === null ? 0 : 1,
+  };
+}
+
+function beatValueFromSixteenthCount(slotCount: number): BeatValue {
+  if (slotCount >= 16) return "whole";
+  if (slotCount >= 8) return "half";
+  if (slotCount >= 4) return "quarter";
+  if (slotCount >= 2) return "eighth";
+  return "sixteenth";
+}
+
+function formatBasicPitchProbeBarPattern(symbols: BasicPitchProbeSymbol[]): string {
+  if (symbols.length === 0) {
+    return "No bar interpretation yet";
+  }
+
+  const compact = symbols.map(formatBasicPitchProbeSymbolShort).join(" + ");
+  const beats = Array.from({ length: 4 }, (_, beatIndex) => {
+    const beatStart = beatIndex * 4;
+    const beatEnd = beatStart + 4;
+    const beatSymbols = symbols.filter(
+      (symbol) => symbol.startSlot < beatEnd && symbol.startSlot + symbol.slotCount > beatStart,
+    );
+    const labels = beatSymbols.map(formatBasicPitchProbeSymbolShort).join(" / ");
+    return `B${beatIndex + 1}: ${labels || "rest"}`;
+  }).join(" | ");
+
+  return `${compact} | ${beats}`;
+}
+
+function formatBasicPitchProbeSymbolShort(symbol: BasicPitchProbeSymbol): string {
+  const value =
+    symbol.value === "whole"
+      ? "whole"
+      : symbol.value === "half"
+        ? "half"
+        : symbol.value === "quarter"
+          ? "quarter"
+          : symbol.value === "eighth"
+            ? "eighth"
+            : "sixteenth";
+  if (symbol.kind === "rest" || symbol.midi === null) {
+    return `${value} rest`;
+  }
+  return `${value} ${midiToSolfege(symbol.midi)}`;
+}
+
+function renderBasicPitchProbeSlot(slot: BasicPitchProbeSlot, activeSlot: number): string {
+  const isActive = slot.index === activeSlot;
+  const noteLabel = slot.midi === null ? "" : midiToSolfege(slot.midi);
+  const detail =
+    slot.midi === null
+      ? `${slot.detectionCount}`
+      : `${midiToScientific(slot.midi)} ${Math.round(slot.confidence * 100)}%`;
+  return `
+    <div class="ai-probe-slot ${isActive ? "active" : ""} ${slot.midi === null ? "is-rest" : "has-note"} ${slot.index % 4 === 0 ? "beat-start" : ""}">
+      <span>${slot.index + 1}</span>
+      <strong>${noteLabel}</strong>
+      <small>${detail}</small>
+    </div>
+  `;
+}
+
+function renderBasicPitchProbeSymbol(
+  symbol: BasicPitchProbeSymbol,
+  activeSlot: number,
+): string {
+  const isActive =
+    activeSlot >= symbol.startSlot && activeSlot < symbol.startSlot + symbol.slotCount;
+  const gridColumn = `${symbol.startSlot + 1} / span ${symbol.slotCount}`;
+  const label =
+    symbol.kind === "rest" || symbol.midi === null
+      ? `${symbol.value} rest`
+      : `${symbol.value} ${midiToSolfege(symbol.midi)} ${midiToScientific(symbol.midi)}`;
+  const detail =
+    symbol.kind === "rest" || symbol.midiFloat === null || symbol.freqHz === null
+      ? `${symbol.slotCount} slot${symbol.slotCount === 1 ? "" : "s"} | score ${symbol.score.toFixed(2)}`
+      : `MIDI ${symbol.midiFloat.toFixed(2)} | ${Math.round(symbol.confidence * 100)}% | ${symbol.evidenceSlots}/${symbol.slotCount}`;
+  return `
+    <div class="ai-probe-symbol ${symbol.kind} ${isActive ? "active" : ""}" style="grid-column:${gridColumn};">
+      <strong>${escapeHtml(label)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>
+  `;
+}
+
+function renderBasicPitchProbeSheet(): string {
+  const detections = basicPitchProbe.detections;
+  const points = detections.map(renderBasicPitchProbeSheetPoint).join("");
+  return `
+    <div class="ai-probe-sheet" aria-label="Basic Pitch detected pitch sheet">
+      <div class="ai-probe-sheet-line l1"></div>
+      <div class="ai-probe-sheet-line l2"></div>
+      <div class="ai-probe-sheet-line l3"></div>
+      <div class="ai-probe-sheet-line l4"></div>
+      <div class="ai-probe-sheet-line l5"></div>
+      ${points || `<div class="ai-probe-sheet-empty">No pitch points yet</div>`}
+    </div>
+  `;
+}
+
+function renderBasicPitchProbeSheetPoint(detection: BasicPitchProbeDetection): string {
+  const range = basicPitchProbeDetectionTimeRange();
+  const leftPct =
+    range.maxMs === range.minMs
+      ? 50
+      : 2 + ((detection.absMs - range.minMs) / (range.maxMs - range.minMs)) * 96;
+  const topPx = continuousStaffYForMidi(detection.midiFloat) + AI_PROBE_SHEET_Y_OFFSET;
+  const opacity = (0.28 + detection.confidence * 0.72).toFixed(3);
+  const title = `t ${detection.absMs.toFixed(1)} ms | MIDI ${detection.midiFloat.toFixed(3)} | ${detection.freqHz.toFixed(2)} Hz | conf ${detection.confidence.toFixed(3)}`;
+  return `<span class="ai-probe-sheet-point" style="left:${leftPct.toFixed(3)}%; top:${topPx.toFixed(2)}px; opacity:${opacity};" title="${escapeHtml(title)}"></span>`;
+}
+
+function basicPitchProbeDetectionTimeRange(): { minMs: number; maxMs: number } {
+  if (basicPitchProbe.detections.length === 0) {
+    return { minMs: 0, maxMs: 0 };
+  }
+  return {
+    minMs: basicPitchProbe.detections[0].absMs,
+    maxMs: basicPitchProbe.detections[basicPitchProbe.detections.length - 1].absMs,
+  };
+}
+
+function continuousStaffYForMidi(midiFloat: number): number {
+  let lower = Math.floor(midiFloat);
+  let upper = Math.ceil(midiFloat);
+  while (!isNaturalMidi(lower)) lower -= 1;
+  while (!isNaturalMidi(upper)) upper += 1;
+
+  if (lower === upper) {
+    return midiToStaffY(lower);
+  }
+
+  const lowerY = midiToStaffY(lower);
+  const upperY = midiToStaffY(upper);
+  const fraction = (midiFloat - lower) / (upper - lower);
+  return lowerY + (upperY - lowerY) * fraction;
+}
+
+function isNaturalMidi(midi: number): boolean {
+  const pitchClass = ((midi % 12) + 12) % 12;
+  return pitchClass === 0 || pitchClass === 2 || pitchClass === 4 || pitchClass === 5 || pitchClass === 7 || pitchClass === 9 || pitchClass === 11;
+}
+
+function renderBasicPitchProbeDetectionRow(detection: BasicPitchProbeDetection): string {
+  return `
+    <div class="ai-probe-table-row" role="row">
+      <span>${detection.absMs.toFixed(1)}</span>
+      <span>${detection.midiFloat.toFixed(3)}</span>
+      <span>${detection.freqHz.toFixed(2)}</span>
+      <span>${formatSigned(detection.cents)}</span>
+      <span>${detection.confidence.toFixed(3)}</span>
+      <span>${detection.frameIndex}</span>
+      <span>${detection.binIndex}</span>
+    </div>
+  `;
 }
 
 function captureButtonLabel(): string {
@@ -1862,29 +2729,87 @@ function syncPracticePatternStopTimer(pattern = selectedPracticePattern()): void
     return;
   }
 
-  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
-  const cycleDurationMs = pattern.notes.length * noteDurationMs;
+  const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const order = practicePatternTraversalOrder(pattern);
+  const passStartStepIndex = practicePatternPassStartStepIndexForCycleKey(practicePatternCycleIndex);
+  const passEndStepIndex = practicePatternPassEndStepIndex(practicePatternCycleIndex, order.length);
+  const cycleDurationMs =
+    practicePatternOrderDurationBeats(order, passStartStepIndex, passEndStepIndex) * beatDurationMs;
   const elapsedMs = performance.now() - practicePatternPassStartedAtMs;
   const currentCycle = Math.max(0, Math.floor(Math.max(0, elapsedMs) / cycleDurationMs));
   const remainingMs =
     practicePatternPassStartedAtMs + (currentCycle + 1) * cycleDurationMs - performance.now() + 140;
 
   if (remainingMs <= 0) {
-    markElapsedPracticePatternOrder(practicePatternTraversalOrder(pattern), pattern.notes.length, 0);
-    finalizePracticePatternPass(practicePatternCycleIndex, practicePatternTraversalOrder(pattern));
+    markElapsedPracticePatternOrder(order, passEndStepIndex, passStartStepIndex);
+    finalizePracticePatternPass(practicePatternCycleIndex, order);
     stopPracticePatternPlayback(false);
     return;
   }
 
   practicePatternStopTimer = window.setTimeout(() => {
-    markElapsedPracticePatternOrder(practicePatternTraversalOrder(pattern), pattern.notes.length, 0);
-    finalizePracticePatternPass(practicePatternCycleIndex, practicePatternTraversalOrder(pattern));
+    markElapsedPracticePatternOrder(order, passEndStepIndex, passStartStepIndex);
+    finalizePracticePatternPass(practicePatternCycleIndex, order);
     stopPracticePatternPlayback(false);
   }, remainingMs);
 }
 
 function practicePatternNoteDurationMs(): number {
   return metronomeBeatDurationMs();
+}
+
+function normalizePracticeNoteDurationBeats(value: number | undefined): number {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? value : 1;
+  return Math.max(0.25, Math.min(16, Math.round(numeric * 4) / 4));
+}
+
+function practicePatternNoteDurationBeats(note: PracticePatternNote | undefined): number {
+  return normalizePracticeNoteDurationBeats(note?.durationBeats);
+}
+
+function practicePatternStepDurationBeats(order: number[], stepIndex: number): number {
+  const noteIndex = order[stepIndex];
+  const note = noteIndex === undefined ? undefined : selectedPracticePattern().notes[noteIndex];
+  return practicePatternNoteDurationBeats(note);
+}
+
+function practicePatternOrderDurationBeats(
+  order: number[],
+  startStepIndex: number,
+  endStepIndex: number,
+): number {
+  let total = 0;
+  for (let i = Math.max(0, startStepIndex); i < Math.min(order.length, endStepIndex); i += 1) {
+    total += practicePatternStepDurationBeats(order, i);
+  }
+  return total;
+}
+
+function practicePatternStepStartBeats(
+  order: number[],
+  passStartStepIndex: number,
+  stepIndex: number,
+): number {
+  return practicePatternOrderDurationBeats(order, passStartStepIndex, stepIndex);
+}
+
+function practicePatternStepIndexAtElapsedBeats(
+  order: number[],
+  startStepIndex: number,
+  endStepIndex: number,
+  elapsedBeats: number,
+): number {
+  let cursorBeats = 0;
+  const start = Math.max(0, startStepIndex);
+  const end = Math.min(order.length, endStepIndex);
+  for (let stepIndex = start; stepIndex < end; stepIndex += 1) {
+    const durationBeats = practicePatternStepDurationBeats(order, stepIndex);
+    if (elapsedBeats < cursorBeats + durationBeats) {
+      return stepIndex;
+    }
+    cursorBeats += durationBeats;
+  }
+  return Math.max(start, end - 1);
 }
 
 function practicePatternCurrentIndex(nowMs: number): number | null {
@@ -1906,7 +2831,7 @@ function practicePatternCurrentPosition(nowMs: number): PracticePatternPosition 
   const order = practicePatternTraversalOrder(pattern);
   settlePracticePatternPassForNow(nowMs, order);
 
-  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
   const elapsedMs = nowMs - practicePatternPassStartedAtMs;
   if (elapsedMs < 0) {
     return null;
@@ -1918,13 +2843,25 @@ function practicePatternCurrentPosition(nowMs: number): PracticePatternPosition 
     return null;
   }
 
-  const passStepOffset = Math.floor(elapsedMs / noteDurationMs);
-  if (!practicePatternLoopEnabled && passStepOffset >= passLength) {
+  const passDurationBeats = practicePatternOrderDurationBeats(
+    order,
+    passStartStepIndex,
+    passEndStepIndex,
+  );
+  const elapsedBeats = elapsedMs / beatDurationMs;
+  if (!practicePatternLoopEnabled && elapsedBeats >= passDurationBeats) {
     return null;
   }
 
-  const stepIndex = passStartStepIndex + Math.min(passStepOffset, passLength - 1);
+  const stepIndex = practicePatternStepIndexAtElapsedBeats(
+    order,
+    passStartStepIndex,
+    passEndStepIndex,
+    Math.min(elapsedBeats, Math.max(0, passDurationBeats - 0.0001)),
+  );
   const noteIndex = order[stepIndex];
+  const stepStartBeats = practicePatternStepStartBeats(order, passStartStepIndex, stepIndex);
+  const durationBeats = practicePatternStepDurationBeats(order, stepIndex);
   return noteIndex !== undefined
     ? {
         noteIndex,
@@ -1932,7 +2869,8 @@ function practicePatternCurrentPosition(nowMs: number): PracticePatternPosition 
         passStartStepIndex,
         cycleIndex: Math.floor(practicePatternCycleIndex / 2),
         cycleKey: practicePatternCycleIndex,
-        stepElapsedMs: elapsedMs - passStepOffset * noteDurationMs,
+        stepElapsedMs: Math.max(0, (elapsedBeats - stepStartBeats) * beatDurationMs),
+        noteDurationMs: durationBeats * beatDurationMs,
         cycleElapsedMs: elapsedMs,
         order,
       }
@@ -1947,7 +2885,7 @@ function settlePracticePatternPassForNow(nowMs: number, order: number[]): void {
   let guard = 0;
   while (guard < 8) {
     guard += 1;
-    const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+    const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
     const passStartStepIndex = practicePatternPassStartStepIndexForCycleKey(practicePatternCycleIndex);
     const passEndStepIndex = practicePatternPassEndStepIndex(practicePatternCycleIndex, order.length);
     const passLength = Math.max(0, passEndStepIndex - passStartStepIndex);
@@ -1955,7 +2893,8 @@ function settlePracticePatternPassForNow(nowMs: number, order: number[]): void {
       return;
     }
 
-    const passDurationMs = passLength * noteDurationMs;
+    const passDurationMs =
+      practicePatternOrderDurationBeats(order, passStartStepIndex, passEndStepIndex) * beatDurationMs;
     if (nowMs < practicePatternPassStartedAtMs + passDurationMs) {
       return;
     }
@@ -1992,9 +2931,8 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
     return;
   }
 
-  const noteDurationMs = practicePatternNoteDurationMs();
   const assignmentStepIndex = practicePatternAssignmentStepIndex(position, playedMidi);
-  if (assignmentStepIndex === null && position.stepElapsedMs < noteDurationMs * 0.18) {
+  if (assignmentStepIndex === null && position.stepElapsedMs < position.noteDurationMs * 0.12) {
     return;
   }
 
@@ -2018,10 +2956,35 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
 
   const isCorrect = playedMidi === target.midi;
   recordPracticeAnalysisPlayed(position, assignmentStepIndex, noteIndex, playedMidi, frame.tMs);
-  if (result.status === "pending") {
-    result.status = isCorrect ? "correct" : "wrong";
+  if (!isCorrect) {
+    if (result.status === "correct") {
+      return;
+    }
+    result.status = "wrong";
+    result.playedMidi = playedMidi;
+    result.revealed = true;
+    result.correctMs = 0;
+    result.lastFrameMs = null;
+    return;
+  }
+
+  const frameDeltaMs =
+    result.lastFrameMs === null
+      ? 0
+      : clamp(frame.tMs - result.lastFrameMs, 0, Math.min(120, position.noteDurationMs));
+  result.correctMs += frameDeltaMs;
+  result.lastFrameMs = frame.tMs;
+  if (result.correctMs >= requiredPracticeHoldMs(position.noteDurationMs)) {
+    result.status = "correct";
+    result.playedMidi = playedMidi;
+    result.revealed = true;
+  } else if (result.status === "pending") {
     result.playedMidi = playedMidi;
   }
+}
+
+function requiredPracticeHoldMs(noteDurationMs: number): number {
+  return clamp(noteDurationMs * 0.55, 70, Math.max(70, noteDurationMs * 0.82));
 }
 
 function markElapsedPracticePatternSteps(position: PracticePatternPosition): void {
@@ -2062,12 +3025,12 @@ function ensurePracticeAnalysisStepForParts(
     return existing;
   }
 
-  const stepOffset = stepIndex - passStartStepIndex;
-  const noteDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const stepStartBeats = practicePatternStepStartBeats(order, passStartStepIndex, stepIndex);
   const step: PracticeAnalysisStep = {
     key,
     sequenceIndex: practiceAnalysisSteps.length,
-    expectedMs: practicePatternPassStartedAtMs + stepOffset * noteDurationMs,
+    expectedMs: practicePatternPassStartedAtMs + stepStartBeats * beatDurationMs,
     targetIndex: noteIndex,
     targetMidi: target.midi,
     targetLabel: target.label,
@@ -2128,14 +3091,16 @@ function practicePatternAssignmentStepIndex(
     return null;
   }
 
-  const noteDurationMs = practicePatternNoteDurationMs();
-  const correctionWindowMs = practicePatternTimingCorrectionWindowMs();
+  const correctionWindowMs = Math.min(
+    position.noteDurationMs * 0.35,
+    practicePatternTimingCorrectionWindowMs(),
+  );
   const passEndStepIndex = practicePatternPassEndStepIndex(position.cycleKey, position.order.length);
   const candidates = [position.stepIndex];
   if (position.stepElapsedMs <= correctionWindowMs) {
     candidates.push(position.stepIndex - 1);
   }
-  if (noteDurationMs - position.stepElapsedMs <= correctionWindowMs) {
+  if (position.noteDurationMs - position.stepElapsedMs <= correctionWindowMs) {
     candidates.push(position.stepIndex + 1);
   }
 
@@ -2236,6 +3201,171 @@ function applyPracticePatternDefaults(pattern: PracticePattern): void {
   practicePatternTempoRamp = createPracticePatternTempoRamp(pattern);
 }
 
+async function loadSavedPracticePatterns(): Promise<void> {
+  if (!localPatternStorageAllowed()) {
+    practicePatternStorageAvailable = false;
+    practicePatternStorageStatus = "Local app required";
+    scheduleRender();
+    return;
+  }
+
+  try {
+    const savedPatterns = await fetchSavedPracticePatterns();
+    practicePatterns = mergePracticePatterns(savedPatterns);
+    practicePatternStorageAvailable = true;
+    practicePatternStorageStatus =
+      savedPatterns.length > 0 ? `${savedPatterns.length} saved` : "Local saves ready";
+  } catch (error) {
+    console.info("Saved practice patterns unavailable", error);
+    practicePatterns = [...PRACTICE_PATTERNS];
+    practicePatternStorageAvailable = false;
+    practicePatternStorageStatus = "Local backend required";
+  }
+  if (!practicePatterns.some((pattern) => pattern.id === selectedPracticePatternId)) {
+    selectedPracticePatternId = PRACTICE_PATTERNS[0].id;
+    applyPracticePatternDefaults(PRACTICE_PATTERNS[0]);
+  }
+  scheduleRender();
+}
+
+async function onPracticePatternManage(): Promise<void> {
+  if (practicePatternManagementBusy) {
+    return;
+  }
+
+  const pattern = selectedPracticePattern();
+  if (isPatternEntrySelected()) {
+    await savePatternEntryAsCustomPattern();
+    return;
+  }
+
+  if (isCustomPracticePattern(pattern)) {
+    await deleteCustomPracticePattern(pattern);
+  }
+}
+
+async function savePatternEntryAsCustomPattern(): Promise<void> {
+  if (!practicePatternStorageAvailable) {
+    alert("Saving patterns is only available when the local backend is running from the local app.");
+    return;
+  }
+
+  const notes = sheetEntryPatternNotes();
+  if (notes.length === 0) {
+    alert("Enter at least one note before saving the pattern.");
+    return;
+  }
+
+  const name = prompt("Pattern name");
+  if (name === null) {
+    return;
+  }
+  const trimmedName = name.replace(/\s+/g, " ").trim();
+  if (!trimmedName) {
+    alert("Pattern name is required.");
+    return;
+  }
+
+  practicePatternManagementBusy = true;
+  practicePatternStorageStatus = "Saving pattern";
+  scheduleRender();
+  try {
+    const saved = await savePracticePattern({
+      name: trimmedName,
+      defaultLoop: practicePatternLoopEnabled,
+      defaultLoopMode: practicePatternLoopMode,
+      defaultCountInBeats: practicePatternCountInBeats,
+      tempoRamp: practicePatternTempoRamp,
+      notes,
+    });
+    practicePatterns = mergePracticePatterns([...customPracticePatterns(), saved]);
+    selectedPracticePatternId = saved.id;
+    applyPracticePatternDefaults(saved);
+    practicePatternResults = createPracticePatternResults();
+    practicePatternPassSummary = null;
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    resetPracticeAnalysis();
+    practicePatternStorageAvailable = true;
+    practicePatternStorageStatus = "Pattern saved";
+  } catch (error) {
+    console.error("Pattern save failed", error);
+    practicePatternStorageStatus = "Save failed";
+    alert(error instanceof Error ? error.message : "Pattern save failed.");
+  } finally {
+    practicePatternManagementBusy = false;
+    scheduleRender();
+  }
+}
+
+async function deleteCustomPracticePattern(pattern: PracticePattern): Promise<void> {
+  if (!practicePatternStorageAvailable) {
+    alert("Deleting patterns is only available when the local backend is running from the local app.");
+    return;
+  }
+
+  const confirmed = confirm(`Delete "${pattern.name}"?`);
+  if (!confirmed) {
+    return;
+  }
+
+  practicePatternManagementBusy = true;
+  practicePatternStorageStatus = "Deleting pattern";
+  scheduleRender();
+  try {
+    await deletePracticePattern(pattern.id);
+    const remainingCustomPatterns = customPracticePatterns().filter((item) => item.id !== pattern.id);
+    practicePatterns = mergePracticePatterns(remainingCustomPatterns);
+    selectedPracticePatternId = PATTERN_ENTRY_ID;
+    applyPracticePatternDefaults(practicePatternById(PATTERN_ENTRY_ID));
+    practicePatternResults = createPracticePatternResults();
+    practicePatternPassSummary = null;
+    practicePatternPassAccumulator = createPracticePatternPassAccumulator();
+    resetPracticeAnalysis();
+    practicePatternStorageStatus =
+      remainingCustomPatterns.length > 0 ? `${remainingCustomPatterns.length} saved` : "Local saves ready";
+  } catch (error) {
+    console.error("Pattern delete failed", error);
+    practicePatternStorageStatus = "Delete failed";
+    alert(error instanceof Error ? error.message : "Pattern delete failed.");
+  } finally {
+    practicePatternManagementBusy = false;
+    scheduleRender();
+  }
+}
+
+function mergePracticePatterns(customPatterns: PracticePattern[]): PracticePattern[] {
+  const patternEntry = PRACTICE_PATTERNS.find((pattern) => pattern.id === PATTERN_ENTRY_ID);
+  const fixedPatterns = PRACTICE_PATTERNS.filter((pattern) => pattern.id !== PATTERN_ENTRY_ID);
+  const uniqueCustomPatterns = customPatterns.filter((pattern, index, patterns) =>
+    isCustomPracticePattern(pattern) &&
+    patterns.findIndex((candidate) => candidate.id === pattern.id) === index,
+  );
+  return patternEntry
+    ? [...fixedPatterns, ...uniqueCustomPatterns, patternEntry]
+    : [...fixedPatterns, ...uniqueCustomPatterns];
+}
+
+function customPracticePatterns(): PracticePattern[] {
+  return practicePatterns.filter(isCustomPracticePattern);
+}
+
+function isCustomPracticePattern(pattern: PracticePattern): boolean {
+  return pattern.id !== PATTERN_ENTRY_ID && !FIXED_PRACTICE_PATTERN_IDS.has(pattern.id);
+}
+
+function syncPracticePatternSelectOptions(): void {
+  if (!ui) return;
+  const optionSignature = practicePatterns.map((pattern) => `${pattern.id}:${pattern.name}`).join("|");
+  if (ui.practicePatternSelect.dataset.optionSignature === optionSignature) {
+    return;
+  }
+  ui.practicePatternSelect.innerHTML = practicePatterns
+    .map((pattern) => `<option value="${escapeHtml(pattern.id)}">${escapeHtml(pattern.name)}</option>`)
+    .join("");
+  ui.practicePatternSelect.dataset.optionSignature = optionSignature;
+  ui.practicePatternSelect.value = selectedPracticePatternId;
+}
+
 function createPracticePatternTempoRamp(pattern: PracticePattern): PracticePatternTempoRamp {
   const ramp = pattern.tempoRamp ?? {
     initialBpm: sequenceSettings.bpm,
@@ -2325,7 +3455,7 @@ function createPracticePatternPassAccumulator(): PracticePatternPassAccumulator 
     tempoSamples: 0,
     frameCount: 0,
     bleedFrameCount: 0,
-    bleedStringCounts: new Map<string, number>(),
+    bleedStringCounts: new Map<InstrumentStringId, number>(),
   };
 }
 
@@ -2365,11 +3495,8 @@ function isAudiblePracticeFrame(frame: PitchFrame): boolean {
   );
 }
 
-function openStringMidi(stringName: "G" | "D" | "A" | "E"): number {
-  if (stringName === "G") return 55;
-  if (stringName === "D") return 62;
-  if (stringName === "A") return 69;
-  return 76;
+function openStringMidi(stringId: InstrumentStringId): number | null {
+  return instrumentStringOpenMidi(stringId);
 }
 
 function capturePracticePatternTempoFrame(frame: TempoFrame): void {
@@ -2422,7 +3549,7 @@ function practicePassTempoLabel(status: TempoFrame["status"]): string {
   }
 }
 
-function mostCommonBleedString(counts: Map<string, number>): string | null {
+function mostCommonBleedString(counts: Map<InstrumentStringId, number>): InstrumentStringId | null {
   let bestString: string | null = null;
   let bestCount = 0;
   for (const [stringName, count] of counts.entries()) {
@@ -2588,7 +3715,7 @@ function beginTuningPass(phase: Exclude<TuningPhase, "idle" | "complete">): void
       verified: phase === "review" ? false : existing?.verified ?? false,
       bleedFrameCount: existing?.bleedFrameCount ?? 0,
       bleedMaxRatio: existing?.bleedMaxRatio ?? 0,
-      bleedStringCounts: existing?.bleedStringCounts ?? new Map<string, number>(),
+      bleedStringCounts: existing?.bleedStringCounts ?? new Map<InstrumentStringId, number>(),
     };
   });
   tuningLastInstruction = tuningInstructionForCurrentTarget();
@@ -2607,7 +3734,7 @@ function resetTuningSession(): void {
     verified: false,
     bleedFrameCount: 0,
     bleedMaxRatio: 0,
-    bleedStringCounts: new Map<string, number>(),
+    bleedStringCounts: new Map<InstrumentStringId, number>(),
   }));
   tuningLastInstruction = "Enter one open-string note per string, then start.";
 }
@@ -2654,7 +3781,7 @@ function ensureTuningResults(): void {
     verified: false,
     bleedFrameCount: 0,
     bleedMaxRatio: 0,
-    bleedStringCounts: new Map<string, number>(),
+    bleedStringCounts: new Map<InstrumentStringId, number>(),
   });
 }
 
@@ -2987,6 +4114,7 @@ function renderPracticePanel(): void {
 
   const practice = state.practice;
   const pattern = selectedPracticePattern();
+  syncPracticePatternSelectOptions();
   const statusLabel = practiceStatusLabel(practice.status, state.listening);
   const statusClass = practice.status;
   ui.practiceStatus.className = `practice-status status-${statusClass}`;
@@ -3002,6 +4130,30 @@ function renderPracticePanel(): void {
     practicePatternPlaying ? `Stop ${pattern.name}` : `Start ${pattern.name}`,
   );
   ui.practicePatternPlayBtn.classList.toggle("playing", practicePatternPlaying);
+  const isCustomPattern = isCustomPracticePattern(pattern);
+  const canSavePatternEntry =
+    isPatternEntrySelected() &&
+    sheetEntryPatternNotes().length > 0 &&
+    practicePatternStorageAvailable &&
+    !practicePatternManagementBusy;
+  const canDeleteCustomPattern =
+    isCustomPattern &&
+    practicePatternStorageAvailable &&
+    !practicePatternManagementBusy &&
+    !practicePatternPlaying;
+  ui.practicePatternManageBtn.textContent = isPatternEntrySelected()
+    ? "Save"
+    : isCustomPattern
+      ? "Delete"
+      : "Save";
+  ui.practicePatternManageBtn.disabled = isPatternEntrySelected()
+    ? !canSavePatternEntry
+    : !canDeleteCustomPattern;
+  ui.practicePatternManageBtn.style.display =
+    isPatternEntrySelected() || isCustomPattern ? "" : "none";
+  ui.practicePatternStorageStatus.textContent = practicePatternStorageStatus;
+  ui.practicePatternStorageStatus.style.display =
+    isPatternEntrySelected() || isCustomPattern ? "" : "none";
   const canAnalyze = practiceAnalysisSteps.length > 0 && !practicePatternPlaying;
   ui.practiceAnalysisBtn.disabled = !canAnalyze;
   ui.practiceAnalysisBtn.classList.toggle("active", showPracticeAnalysis);
@@ -3020,7 +4172,7 @@ function renderPracticePanel(): void {
     `${practice.targetBpm} bpm target · ${estimatedText}${diffText} · conf ${(practice.confidence * 100).toFixed(0)}% · signal ${(practice.novelty * 100).toFixed(0)}%`;
   ui.practiceEstimate.style.display = showPracticeDebug ? "" : "none";
   ui.practiceDetail.textContent =
-    `±${practiceTolerancePct}% · ${practiceCorrectionSource}`;
+    `±${practiceTolerancePct}% · ${practiceCorrectionSource} · ${practicePitchEngineLabel(practicePitchEngine)}`;
   ui.practiceDebug.innerHTML = renderPracticeDebug();
   ui.practiceAnalysisPanel.style.display = showPracticeAnalysis ? "block" : "none";
   ui.practiceAnalysisPanel.innerHTML = showPracticeAnalysis ? renderPracticeAnalysis() : "";
@@ -3402,7 +4554,18 @@ function practiceStatusLabel(status: TempoFrame["status"], listening: boolean): 
 }
 
 function isStringPurityActive(): boolean {
-  return enableStringPurityCheck || state.mode === "practice" || state.mode === "spectrum" || state.mode === "tuning";
+  if (state.mode === "ai-probe") {
+    return false;
+  }
+  if (isPracticeAiPitchActive()) {
+    return false;
+  }
+  return (
+    enableStringPurityCheck ||
+    state.mode === "practice" ||
+    state.mode === "spectrum" ||
+    state.mode === "tuning"
+  );
 }
 
 function syncStringPurityPipeline(): void {
@@ -3446,6 +4609,32 @@ function defaultPracticePeakMergeMs(bpm: number): number {
 
 function asPracticeCorrectionSource(value: string): TempoResponsivenessLabel {
   return value === "Fast" || value === "Stable" ? value : "Balanced";
+}
+
+function asPitchDetectionEngine(value: string): PitchDetectionEngine {
+  return value === "basic-pitch" ? "basic-pitch" : "autocorrelation";
+}
+
+function practicePitchEngineLabel(engine: PitchDetectionEngine): string {
+  return engine === "basic-pitch" ? "AI pitch" : "Current pitch";
+}
+
+function activePitchEngine(): PitchDetectionEngine {
+  if (state.mode === "ai-probe") {
+    return "basic-pitch";
+  }
+  if (state.mode === "practice") {
+    return practicePitchEngine;
+  }
+  return "autocorrelation";
+}
+
+function isPracticeAiPitchActive(): boolean {
+  return state.mode === "practice" && practicePitchEngine === "basic-pitch";
+}
+
+function shouldUseLocalBackendPipeline(): boolean {
+  return audioProcessingMode === "local-backend" && !isPracticeAiPitchActive();
 }
 
 function buildCurrentNoteSnapshot(displayedMidi: number | null): NoteSnapshot | null {
@@ -3688,12 +4877,192 @@ async function playMetronomeClick(accent: "strong" | "medium" | "weak"): Promise
   osc.stop(startAt + 0.055);
 }
 
+async function playNoteAudition(midi: number): Promise<void> {
+  const normalizedMidi = Math.round(clamp(midi, 0, 127));
+  const frequency = midiToFrequency(normalizedMidi);
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return;
+  }
+
+  setAudioSessionType(state.listening ? "play-and-record" : "playback");
+  const ctx = await ensureSharedAudioContext();
+  stopActiveNoteAudition(0.025);
+
+  const startAt = ctx.currentTime + 0.012;
+  const durationSec = 1.42;
+  const releaseSec = 0.34;
+  const stopAt = startAt + durationSec + releaseSec + 0.08;
+
+  const master = ctx.createGain();
+  const compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.setValueAtTime(-24, startAt);
+  compressor.knee.setValueAtTime(18, startAt);
+  compressor.ratio.setValueAtTime(3.2, startAt);
+  compressor.attack.setValueAtTime(0.004, startAt);
+  compressor.release.setValueAtTime(0.16, startAt);
+
+  master.connect(compressor);
+  compressor.connect(ctx.destination);
+  master.gain.setValueAtTime(0.0001, startAt);
+  master.gain.exponentialRampToValueAtTime(0.24, startAt + 0.075);
+  master.gain.exponentialRampToValueAtTime(0.18, startAt + 0.28);
+  master.gain.setValueAtTime(0.18, startAt + durationSec);
+  master.gain.exponentialRampToValueAtTime(0.0001, startAt + durationSec + releaseSec);
+
+  const sourceBus = ctx.createGain();
+  sourceBus.gain.setValueAtTime(0.82, startAt);
+  connectViolinBody(ctx, sourceBus, master, frequency, startAt);
+
+  const vibrato = ctx.createOscillator();
+  const vibratoDepth = ctx.createGain();
+  vibrato.type = "sine";
+  vibrato.frequency.setValueAtTime(5.4, startAt);
+  vibratoDepth.gain.setValueAtTime(0, startAt);
+  vibratoDepth.gain.linearRampToValueAtTime(10, startAt + 0.32);
+  vibrato.connect(vibratoDepth);
+
+  const sources: AudioScheduledSourceNode[] = [vibrato];
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "sawtooth", 0.62, 0, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "triangle", 0.22, -5, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 2, "sine", 0.18, 3, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 3, "sine", 0.1, -4, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 4, "sine", 0.045, 6, startAt, stopAt, sources);
+  addBowNoise(ctx, sourceBus, durationSec + releaseSec, startAt, stopAt, sources);
+
+  vibrato.start(startAt);
+  vibrato.stop(stopAt);
+  activeNoteAudition = { gain: master, sources };
+}
+
+function stopActiveNoteAudition(releaseSec = 0.08): void {
+  if (!activeNoteAudition) {
+    return;
+  }
+
+  const { gain, sources } = activeNoteAudition;
+  const now = gain.context.currentTime;
+  gain.gain.cancelScheduledValues(now);
+  gain.gain.setTargetAtTime(0.0001, now, Math.max(0.01, releaseSec / 3));
+  for (const source of sources) {
+    try {
+      source.stop(now + releaseSec);
+    } catch {
+      // Already stopped by its original schedule.
+    }
+  }
+  activeNoteAudition = null;
+}
+
+function addViolinOscillator(
+  ctx: AudioContext,
+  destination: AudioNode,
+  vibratoDepth: GainNode,
+  frequency: number,
+  harmonic: number,
+  type: OscillatorType,
+  level: number,
+  detuneCents: number,
+  startAt: number,
+  stopAt: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(frequency * harmonic, startAt);
+  osc.detune.setValueAtTime(detuneCents, startAt);
+  vibratoDepth.connect(osc.detune);
+  gain.gain.setValueAtTime(level, startAt);
+  osc.connect(gain);
+  gain.connect(destination);
+  osc.start(startAt);
+  osc.stop(stopAt);
+  sources.push(osc);
+}
+
+function connectViolinBody(
+  ctx: AudioContext,
+  source: AudioNode,
+  destination: AudioNode,
+  frequency: number,
+  startAt: number,
+): void {
+  const dryFilter = ctx.createBiquadFilter();
+  const dryGain = ctx.createGain();
+  dryFilter.type = "lowpass";
+  dryFilter.frequency.setValueAtTime(clamp(frequency * 18, 2600, 7400), startAt);
+  dryFilter.Q.setValueAtTime(0.72, startAt);
+  dryGain.gain.setValueAtTime(0.78, startAt);
+  source.connect(dryFilter);
+  dryFilter.connect(dryGain);
+  dryGain.connect(destination);
+
+  const resonances = [
+    { frequency: 285, q: 1.2, gain: 0.08 },
+    { frequency: 460, q: 1.05, gain: 0.07 },
+    { frequency: 930, q: 1.25, gain: 0.055 },
+    { frequency: 1650, q: 1.15, gain: 0.04 },
+    { frequency: 3100, q: 0.9, gain: 0.025 },
+  ];
+
+  for (const resonance of resonances) {
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+    filter.type = "bandpass";
+    filter.frequency.setValueAtTime(resonance.frequency, startAt);
+    filter.Q.setValueAtTime(resonance.q, startAt);
+    gain.gain.setValueAtTime(resonance.gain, startAt);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(destination);
+  }
+}
+
+function addBowNoise(
+  ctx: AudioContext,
+  destination: AudioNode,
+  durationSec: number,
+  startAt: number,
+  stopAt: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const frameCount = Math.ceil(ctx.sampleRate * Math.max(0.1, durationSec + 0.12));
+  const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  let smoothed = 0;
+  for (let i = 0; i < frameCount; i += 1) {
+    smoothed = smoothed * 0.9 + (Math.random() * 2 - 1) * 0.1;
+    data[i] = smoothed;
+  }
+
+  const noise = ctx.createBufferSource();
+  const filter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  noise.buffer = buffer;
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(3200, startAt);
+  filter.Q.setValueAtTime(0.65, startAt);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.linearRampToValueAtTime(0.024, startAt + 0.05);
+  gain.gain.exponentialRampToValueAtTime(0.014, startAt + 0.24);
+  gain.gain.setValueAtTime(0.014, startAt + Math.max(0.26, durationSec - 0.18));
+  gain.gain.exponentialRampToValueAtTime(0.0001, stopAt - 0.04);
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(destination);
+  noise.start(startAt);
+  noise.stop(stopAt);
+  sources.push(noise);
+}
+
 function resetMetronomeClock(): void {
   metronomeStartMs = performance.now();
   metronomeLastTickIndex = null;
 }
 
 async function onToggleListening(): Promise<void> {
+  const aiProbeActive = state.mode === "ai-probe";
+  const practiceAiPitchActive = isPracticeAiPitchActive();
   if (state.listening) {
     stopPracticePatternPlayback(false);
     pipeline?.stop();
@@ -3734,12 +5103,37 @@ async function onToggleListening(): Promise<void> {
       window.clearTimeout(singleBeatStopTimer);
       singleBeatStopTimer = null;
     }
+    if (aiProbeActive) {
+      clearBasicPitchProbe();
+    }
     setAudioSessionType("playback");
+    audioProcessingStatus = aiProbeActive
+      ? "Basic Pitch probe selected"
+      : practiceAiPitchActive
+        ? "AI pitch selected"
+      : stoppedAudioProcessingStatus(audioProcessingMode);
     scheduleRender();
     return;
   }
 
   try {
+    if (aiProbeActive) {
+      if (audioProcessingMode === "local-backend") {
+        const health = await checkBasicPitchBackendAvailability(DEFAULT_BASIC_PITCH_BACKEND_ENDPOINT);
+        audioProcessingStatus = `Basic Pitch ${health.runtime} ready`;
+      } else {
+        audioProcessingStatus = "Basic Pitch buffering";
+      }
+      clearBasicPitchProbe();
+    } else if (practiceAiPitchActive) {
+      audioProcessingStatus = "AI pitch buffering";
+    } else if (shouldUseLocalBackendPipeline()) {
+      const health = await checkBackendAvailability(DEFAULT_BACKEND_ENDPOINT);
+      audioProcessingStatus = `Backend ready (${health.platform})`;
+    } else {
+      audioProcessingStatus = "Browser processing";
+    }
+
     if (isLikelyIOS) {
       setAudioSessionType("play-and-record");
     } else {
@@ -3755,13 +5149,34 @@ async function onToggleListening(): Promise<void> {
       micHandle = await startMic(undefined, micProfile);
     }
 
-    pipeline = startPitchPipeline(
-      micHandle,
-      onPitchFrame,
-      onSpectrumFrame,
-      onTempoFrame,
-      sequenceSettings.bpm,
-    );
+    pipeline =
+      aiProbeActive && audioProcessingMode === "local-backend"
+        ? startBasicPitchBackendPipeline(micHandle, onPitchFrame, {
+            endpoint: DEFAULT_BASIC_PITCH_BACKEND_ENDPOINT,
+            onError: onBasicPitchPipelineError,
+            onAnalysis: onBasicPitchProbeAnalysis,
+          })
+        : !aiProbeActive && shouldUseLocalBackendPipeline()
+        ? startBackendPitchPipeline(
+            micHandle,
+            onPitchFrame,
+            onSpectrumFrame,
+            onTempoFrame,
+            sequenceSettings.bpm,
+            { endpoint: DEFAULT_BACKEND_ENDPOINT, onError: onBackendPipelineError },
+          )
+        : await startPitchPipeline(
+            micHandle,
+            onPitchFrame,
+            onSpectrumFrame,
+            onTempoFrame,
+            sequenceSettings.bpm,
+            {
+              pitchEngine: activePitchEngine(),
+              onError: onBasicPitchPipelineError,
+              onBasicPitchAnalysis: aiProbeActive ? onBasicPitchProbeAnalysis : undefined,
+            },
+          );
     syncStringPurityPipeline();
     syncPracticeSensitivityPipeline();
     syncPracticePeakPickingPipeline();
@@ -3773,16 +5188,198 @@ async function onToggleListening(): Promise<void> {
       syncMetronomeAnimationLoop();
     }
     state.listening = true;
+    if (aiProbeActive) {
+      basicPitchProbe.gridStartMs = performance.now();
+    }
+    audioProcessingStatus = aiProbeActive
+      ? audioProcessingMode === "local-backend"
+        ? "Basic Pitch OpenVINO active"
+        : "Basic Pitch probe active"
+      : practiceAiPitchActive
+        ? "AI pitch active"
+      : activeAudioProcessingStatus(audioProcessingMode);
   } catch (error) {
-    console.error("Microphone start failed", error);
-    alert("Microphone access failed. Please allow mic permissions and retry.");
+    console.error("Listening start failed", error);
+    if (micHandle) {
+      stopMic(micHandle);
+      micHandle = null;
+    }
+    if (!aiProbeActive && shouldUseLocalBackendPipeline()) {
+      audioProcessingMode = "browser";
+      audioProcessingStatus = "Backend unavailable";
+      alert(formatBackendUnavailableMessage(error));
+    } else if (aiProbeActive || practiceAiPitchActive) {
+      audioProcessingStatus =
+        aiProbeActive && audioProcessingMode === "local-backend"
+          ? "Basic Pitch backend unavailable"
+          : "Basic Pitch unavailable";
+      alert(formatBasicPitchUnavailableMessage(error));
+    } else {
+      audioProcessingStatus = "Browser processing";
+      alert("Microphone access failed. Please allow mic permissions and retry.");
+    }
   }
 
   scheduleRender();
 }
 
+async function onAudioProcessingModeChange(event: Event): Promise<void> {
+  const target = event.target as HTMLSelectElement;
+  const previousMode = audioProcessingMode;
+  const nextMode = asAudioProcessingMode(target.value);
+  const practiceAiPitchActive = isPracticeAiPitchActive();
+  if (nextMode === previousMode) {
+    return;
+  }
+
+  if (nextMode === "local-backend" && !practiceAiPitchActive) {
+    try {
+      if (state.mode === "ai-probe") {
+        const health = await checkBasicPitchBackendAvailability(DEFAULT_BASIC_PITCH_BACKEND_ENDPOINT);
+        audioProcessingStatus = `Basic Pitch ${health.runtime} ready`;
+      } else {
+        const health = await checkBackendAvailability(DEFAULT_BACKEND_ENDPOINT);
+        audioProcessingStatus = `Backend ready (${health.platform})`;
+      }
+    } catch (error) {
+      audioProcessingMode = previousMode;
+      audioProcessingStatus =
+        state.mode === "ai-probe" ? "Basic Pitch backend unavailable" : "Backend unavailable";
+      alert(state.mode === "ai-probe" ? formatBasicPitchUnavailableMessage(error) : formatBackendUnavailableMessage(error));
+      scheduleRender();
+      return;
+    }
+  } else if (practiceAiPitchActive) {
+    audioProcessingStatus = state.listening ? "AI pitch active" : "AI pitch selected";
+  } else {
+    audioProcessingStatus =
+      state.mode === "ai-probe"
+        ? state.listening
+          ? "Basic Pitch probe active"
+          : "Basic Pitch probe selected"
+        : state.listening
+          ? "Browser active"
+          : "Browser processing";
+  }
+
+  audioProcessingMode = nextMode;
+
+  if (state.listening) {
+    await onToggleListening();
+    await onToggleListening();
+  }
+
+  scheduleRender();
+}
+
+async function onPracticePitchEngineChange(event: Event): Promise<void> {
+  const target = event.target as HTMLSelectElement;
+  const nextEngine = asPitchDetectionEngine(target.value);
+  if (nextEngine === practicePitchEngine) {
+    return;
+  }
+
+  practicePitchEngine = nextEngine;
+  liveTracker.reset();
+
+  if (!state.listening && state.mode === "practice") {
+    audioProcessingStatus =
+      practicePitchEngine === "basic-pitch"
+        ? "AI pitch selected"
+        : stoppedAudioProcessingStatus(audioProcessingMode);
+  }
+
+  if (state.listening && state.mode === "practice") {
+    await onToggleListening();
+    await onToggleListening();
+  }
+
+  scheduleRender();
+}
+
+function onBackendPipelineError(error: Error): void {
+  console.error("Local backend processing failed", error);
+  audioProcessingMode = "browser";
+  audioProcessingStatus = "Backend failed";
+  alert(formatBackendUnavailableMessage(error));
+  if (state.listening) {
+    void onToggleListening();
+  } else {
+    scheduleRender();
+  }
+}
+
+function onBasicPitchPipelineError(error: Error): void {
+  console.error("Basic Pitch processing failed", error);
+  audioProcessingStatus = "Basic Pitch failed";
+  alert(formatBasicPitchUnavailableMessage(error));
+  if (state.listening) {
+    void onToggleListening();
+  } else {
+    scheduleRender();
+  }
+}
+
+function onBasicPitchProbeAnalysis(analysis: BasicPitchAnalysisFrame): void {
+  const windowStartMs = analysis.tMs - analysis.windowSeconds * 1000;
+  const freshDetections = analysis.pitchDetections
+    .map((detection) => ({
+      ...detection,
+      absMs: windowStartMs + detection.timeSeconds * 1000,
+      analysisMs: analysis.analysisMs,
+    }))
+    .filter((detection) => detection.absMs > basicPitchProbe.lastDetectionAbsMs);
+
+  basicPitchProbe.analysis = analysis;
+  if (freshDetections.length > 0) {
+    basicPitchProbe.detections.push(...freshDetections);
+    basicPitchProbe.lastDetectionAbsMs = freshDetections[freshDetections.length - 1].absMs;
+  }
+  scheduleRender();
+}
+
+function clearBasicPitchProbe(): void {
+  basicPitchProbe.analysis = null;
+  basicPitchProbe.detections = [];
+  basicPitchProbe.lastDetectionAbsMs = Number.NEGATIVE_INFINITY;
+  basicPitchProbe.gridStartMs =
+    state.mode === "ai-probe" && state.listening ? performance.now() : null;
+}
+
+function asAudioProcessingMode(value: string): AudioProcessingMode {
+  if (value === "local-backend") {
+    return "local-backend";
+  }
+  return "browser";
+}
+
+function formatBackendUnavailableMessage(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "Local backend is not available.";
+  return `${detail}\n\nStaying on browser processing.`;
+}
+
+function formatBasicPitchUnavailableMessage(error: unknown): string {
+  const detail = error instanceof Error ? error.message : "Basic Pitch is not available.";
+  return `${detail}\n\nStaying on browser processing.`;
+}
+
+function stoppedAudioProcessingStatus(mode: AudioProcessingMode): string {
+  if (mode === "local-backend") {
+    return "Local backend selected";
+  }
+  return "Browser processing";
+}
+
+function activeAudioProcessingStatus(mode: AudioProcessingMode): string {
+  if (mode === "local-backend") {
+    return "Backend active";
+  }
+  return "Browser active";
+}
+
 function onModeChange(event: Event): void {
   const target = event.target as HTMLSelectElement;
+  const previousMode = state.mode;
   state.mode =
     target.value === "sequence"
       ? "sequence"
@@ -3794,10 +5391,24 @@ function onModeChange(event: Event): void {
             ? "practice"
             : target.value === "tuning"
               ? "tuning"
-              : "live";
+              : target.value === "ai-probe"
+                ? "ai-probe"
+                : "live";
   resetMetronomeClock();
   pipeline?.resetTempo();
   syncStringPurityPipeline();
+
+  if (!state.listening && state.mode === "ai-probe") {
+    audioProcessingStatus = "Basic Pitch probe selected";
+  } else if (!state.listening && state.mode === "practice" && practicePitchEngine === "basic-pitch") {
+    audioProcessingStatus = "AI pitch selected";
+  } else if (!state.listening) {
+    audioProcessingStatus = stoppedAudioProcessingStatus(audioProcessingMode);
+  }
+
+  if (previousMode !== "ai-probe" && state.mode === "ai-probe") {
+    clearBasicPitchProbe();
+  }
 
   if (state.mode === "spectrum") {
     spectrogram?.reset();
@@ -3826,6 +5437,16 @@ function onModeChange(event: Event): void {
       window.clearTimeout(singleBeatStopTimer);
       singleBeatStopTimer = null;
     }
+  }
+
+  const practicePitchEngineChangedByMode =
+    practicePitchEngine === "basic-pitch" &&
+    (previousMode === "practice" || state.mode === "practice");
+  if (
+    state.listening &&
+    (previousMode === "ai-probe" || state.mode === "ai-probe" || practicePitchEngineChangedByMode)
+  ) {
+    void onToggleListening().then(() => onToggleListening());
   }
 
   scheduleRender();
@@ -4384,14 +6005,16 @@ function beatValueWeight(value: BeatValue): number {
   if (value === "whole") return 8;
   if (value === "half") return 4;
   if (value === "quarter") return 2;
-  return 1;
+  if (value === "eighth") return 1;
+  return 0.5;
 }
 
 function weightToBeatValue(weight: number): BeatValue {
   if (weight >= 8) return "whole";
   if (weight >= 4) return "half";
   if (weight >= 2) return "quarter";
-  return "eighth";
+  if (weight >= 1) return "eighth";
+  return "sixteenth";
 }
 
 function decomposeWeight(totalWeight: number): number[] {
@@ -4481,6 +6104,7 @@ function renderStaffPracticePattern(nowMs: number): string {
       const stemDirection = stemDirectionForMidi(note.midi);
       const statusClass = `status-${result.status}`;
       const activeClass = activeIndex === index ? "active active-slot" : "";
+      const durationLabel = practiceDurationLabel(practicePatternNoteDurationBeats(note));
       const overlayMidi = result.status === "wrong" ? result.playedMidi : result.bleedMidi;
       const playedNoteHtml =
         overlayMidi !== null
@@ -4494,12 +6118,12 @@ function renderStaffPracticePattern(nowMs: number): string {
       return `
         <div class="practice-pattern-slot ${activeClass}" data-row-index="${rowIndex}">
           ${ledgers}
-          <div class="staff-batch-note value-quarter practice-pattern-note ${statusClass} ${activeIndex === index ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)}">
+          <div class="staff-batch-note value-quarter practice-pattern-note ${statusClass} ${activeIndex === index ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${note.label} ${midiToScientific(note.midi)} ${durationLabel}">
             <div class="staff-batch-note-head"></div>
             <div class="staff-batch-note-stem"></div>
           </div>
           ${playedNoteHtml}
-          <div class="practice-pattern-target" title="${noteTooltip(note.midi)}">${note.label}</div>
+          <div class="practice-pattern-target" title="${noteTooltip(note.midi)}">${note.label}<small>${durationLabel}</small></div>
           <div class="practice-pattern-played ${statusClass}">${playedLabel}</div>
         </div>
       `;
@@ -4577,6 +6201,8 @@ function visiblePracticePatternResult(result: PracticePatternResult | undefined)
       playedMidi: null,
       bleedMidi: null,
       revealed: false,
+      correctMs: 0,
+      lastFrameMs: null,
     };
   }
   return result;
@@ -5123,21 +6749,60 @@ function formatSheetEntrySlot(slot: SheetEntrySlot): string {
 }
 
 function sheetEntryPatternNotes(): PracticePatternNote[] {
-  return sheetEntrySlots
-    .filter((slot): slot is SheetEntrySlot => slot !== null)
-    .map((slot) => ({
-      midi: slot.midi,
-      label: midiToSolfege(slot.midi),
-    }));
+  const notes: PracticePatternNote[] = [];
+  const slotBeats = sheetEntrySlotDurationBeats(sheetEntrySlotValue);
+  let active: { midi: number; durationBeats: number } | null = null;
+
+  const flushActive = () => {
+    if (!active) {
+      return;
+    }
+    notes.push({
+      midi: active.midi,
+      label: midiToSolfege(active.midi),
+      durationBeats: normalizePracticeNoteDurationBeats(active.durationBeats),
+    });
+    active = null;
+  };
+
+  for (const slot of sheetEntrySlots) {
+    if (!slot) {
+      flushActive();
+      continue;
+    }
+    if (active && active.midi === slot.midi) {
+      active.durationBeats += slotBeats;
+      continue;
+    }
+    flushActive();
+    active = { midi: slot.midi, durationBeats: slotBeats };
+  }
+
+  flushActive();
+  return notes;
+}
+
+function sheetEntrySlotDurationBeats(slotValue: SheetEntrySlotValue): number {
+  return sheetEntrySlotWeight(slotValue) / 4;
 }
 
 function sheetEntryPatternIndexBySlot(): Map<number, number> {
   const map = new Map<number, number>();
   let patternIndex = 0;
+  let activeMidi: number | null = null;
+  let activePatternIndex: number | null = null;
   sheetEntrySlots.forEach((slot, slotIndex) => {
     if (!slot) {
+      activeMidi = null;
+      activePatternIndex = null;
       return;
     }
+    if (activeMidi === slot.midi && activePatternIndex !== null) {
+      map.set(slotIndex, activePatternIndex);
+      return;
+    }
+    activeMidi = slot.midi;
+    activePatternIndex = patternIndex;
     map.set(slotIndex, patternIndex);
     patternIndex += 1;
   });
@@ -5300,7 +6965,7 @@ function renderStaffBeatBatchGrid(
         .join("");
       const noteValueClass = `value-${symbol.value}`;
       const showStem = symbol.value !== "whole";
-      const showFlag = symbol.value === "eighth";
+      const showFlag = symbol.value === "eighth" || symbol.value === "sixteenth";
       const stemHtml = showStem ? `<div class="staff-batch-note-stem"></div>` : "";
       const flagHtml = showFlag ? `<div class="staff-batch-note-flag"></div>` : "";
       return `
@@ -5431,7 +7096,9 @@ function formatBeatSymbolShort(symbol: BeatSymbol): string {
         ? "1/2"
         : symbol.value === "quarter"
           ? "1/4"
-          : "1/8";
+          : symbol.value === "eighth"
+            ? "1/8"
+            : "1/16";
   if (symbol.kind === "rest" || symbol.midi === null) {
     return `${value} ${restSymbolForValue(symbol.value)}`;
   }
@@ -5441,6 +7108,7 @@ function formatBeatSymbolShort(symbol: BeatSymbol): string {
 function restSymbolForValue(value: BeatValue): string {
   if (value === "whole") return "𝄻";
   if (value === "half") return "𝄼";
+  if (value === "sixteenth") return "𝄿";
   if (value === "eighth") return "𝄾";
   return "𝄽";
 }
@@ -5448,6 +7116,7 @@ function restSymbolForValue(value: BeatValue): string {
 function noteSymbolForValue(value: BeatValue): string {
   if (value === "whole") return "𝅝";
   if (value === "half") return "𝅗𝅥";
+  if (value === "sixteenth") return "𝅘𝅥𝅯";
   if (value === "eighth") return "♪";
   return "♩";
 }
@@ -5560,29 +7229,8 @@ function asBeatUnit(value: string): BeatUnit {
   return "quarter";
 }
 
-function makeWarmupGroup(
-  midi: number,
-  label: PracticePatternNote["label"],
-  repeatCount = 4,
-): PracticePatternNote[] {
-  return Array.from({ length: repeatCount }, () => ({ midi, label }));
-}
-
-function makeStaffStepRun(startStep: number, endStep: number): PracticePatternNote[] {
-  const direction = startStep <= endStep ? 1 : -1;
-  const length = Math.abs(endStep - startStep) + 1;
-
-  return Array.from({ length }, (_, index) => {
-    const midi = diatonicStepToNaturalMidi(startStep + index * direction);
-    return {
-      midi,
-      label: midiToSolfege(midi),
-    };
-  });
-}
-
 function practicePatternById(id: string): PracticePattern {
-  return PRACTICE_PATTERNS.find((pattern) => pattern.id === id) ?? PRACTICE_PATTERNS[0];
+  return practicePatterns.find((pattern) => pattern.id === id) ?? PRACTICE_PATTERNS[0];
 }
 
 function selectedPracticePattern(): PracticePattern {
@@ -5602,12 +7250,14 @@ function createPracticePatternResults(): PracticePatternResult[] {
     playedMidi: null,
     bleedMidi: null,
     revealed: false,
+    correctMs: 0,
+    lastFrameMs: null,
   }));
 }
 
 function practicePatternLabels(pattern: PracticePattern): string {
   return pattern.notes
-    .map((note) => note.label)
+    .map((note) => `${note.label}${practicePatternNoteDurationBeats(note) === 1 ? "" : ` ${practiceDurationLabel(practicePatternNoteDurationBeats(note))}`}`)
     .reduce<string[]>((parts, label, index) => {
       if (index > 0 && index % 4 === 0) {
         parts.push("|");
@@ -5616,6 +7266,25 @@ function practicePatternLabels(pattern: PracticePattern): string {
       return parts;
     }, [])
     .join(" ");
+}
+
+function practiceDurationLabel(durationBeats: number): string {
+  const beats = normalizePracticeNoteDurationBeats(durationBeats);
+  if (beats === 4) return "whole";
+  if (beats === 2) return "half";
+  if (beats === 1) return "quarter";
+  if (beats === 0.5) return "eighth";
+  if (beats === 0.25) return "sixteenth";
+  return `${Number.isInteger(beats) ? beats.toFixed(0) : beats.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")} beats`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -5644,9 +7313,12 @@ function formatStringPurityLine(frame: PitchFrame | null): string {
       : bleedRatio >= Math.min(PRACTICE_BLEED_MAX, bleedThreshold + 0.18)
         ? "High bleed"
         : "Possible bleed";
+  const primaryLabel = instrumentStringLabel(frame.primaryString);
   const bleedText =
-    bleedDetected && frame.bleedString ? ` | likely extra ${frame.bleedString} string` : "";
-  return `String purity ${purityPct}% | bleed ${bleedPct} | ${severity} (target ${frame.primaryString})${bleedText}`;
+    bleedDetected && frame.bleedString
+      ? ` | likely extra ${instrumentStringLabel(frame.bleedString)} string`
+      : "";
+  return `String purity ${purityPct}% | bleed ${bleedPct} | ${severity} (target ${primaryLabel})${bleedText}`;
 }
 
 function buildBleedNoteLine(frame: PitchFrame | null): string {
@@ -5659,14 +7331,11 @@ function buildBleedNoteLine(frame: PitchFrame | null): string {
   const bleedLabel = bleedStringToSolfege(frame.bleedString);
   const intensity = bleedOverlayIntensity(frame.adjacentBleedRatio);
   const opacity = (0.08 + intensity * 0.92).toFixed(3);
-  return `<span class="bleed-note-prefix">Secondary:</span> <span class="bleed-note" style="opacity:${opacity};">${bleedLabel} (${frame.bleedString} string)</span>`;
+  return `<span class="bleed-note-prefix">Secondary:</span> <span class="bleed-note" style="opacity:${opacity};">${bleedLabel} (${instrumentStringLabel(frame.bleedString)} string)</span>`;
 }
 
-function bleedStringToSolfege(stringName: "G" | "D" | "A" | "E"): string {
-  if (stringName === "G") return "Sol";
-  if (stringName === "D") return "Re";
-  if (stringName === "A") return "La";
-  return "Mi";
+function bleedStringToSolfege(stringId: InstrumentStringId): string {
+  return instrumentStringSolfege(stringId);
 }
 
 function bleedOverlayIntensity(bleedRatio: number): number {
@@ -5704,3 +7373,4 @@ function detectLikelyIOS(): boolean {
 
 mountUi();
 render();
+void loadSavedPracticePatterns();

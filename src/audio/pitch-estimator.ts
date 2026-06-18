@@ -1,4 +1,5 @@
 import type { InstrumentStringName, PitchFrame } from "./types";
+import { DEFAULT_INSTRUMENT_STRINGS } from "../shared/instrument-profile";
 
 export interface PitchEstimator {
   process(input: Float32Array, tMs: number): PitchFrame;
@@ -140,16 +141,14 @@ export class AutoCorrelationPitchEstimator implements PitchEstimator {
 }
 
 type OpenString = {
-  name: InstrumentStringName;
+  id: InstrumentStringName;
   freqHz: number;
 };
 
-const OPEN_STRINGS: OpenString[] = [
-  { name: "G", freqHz: 196.0 },
-  { name: "D", freqHz: 293.66 },
-  { name: "A", freqHz: 440.0 },
-  { name: "E", freqHz: 659.25 },
-];
+const OPEN_STRINGS: OpenString[] = DEFAULT_INSTRUMENT_STRINGS.map((string) => ({
+  id: string.id,
+  freqHz: string.openHz,
+}));
 
 type ContaminationMetrics = {
   purity: number;
@@ -184,12 +183,12 @@ function estimateAdjacentStringBleed(
   const adjacentEnergy = strongestAdjacent?.energy ?? 0;
   const bleedRatio = adjacentEnergy / (targetEnergy + adjacentEnergy + 1e-9);
   const purity = clamp01(1 - bleedRatio * 1.25);
-  const bleedString = OPEN_STRINGS[strongestAdjacent.index].name;
+  const bleedString = OPEN_STRINGS[strongestAdjacent.index].id;
 
   return {
     purity,
     bleedRatio,
-    primaryString: primary.name,
+    primaryString: primary.id,
     bleedString,
   };
 }

@@ -1,4 +1,8 @@
-export type InstrumentStringName = "G" | "D" | "A" | "E";
+import type { InstrumentStringId } from "../shared/instrument-profile";
+
+export type InstrumentStringName = InstrumentStringId;
+
+export type PitchDetectionEngine = "autocorrelation" | "basic-pitch";
 
 export type PitchFrame = {
   tMs: number;

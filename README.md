@@ -20,6 +20,29 @@ npm install
 npm run dev
 ```
 
+Browser-side autocorrelation audio processing remains the default. Choose
+`AI Probe` in the mode selector to inspect Spotify Basic Pitch as a buffered,
+browser-side model. The probe shows raw contour pitch detections rather than
+grouped or pitch-quantized note events. For local
+experiments with backend processing, run:
+
+```bash
+npm run dev:backend
+```
+
+Then choose `Local backend` in the app's Audio selector. The backend listens on
+`http://127.0.0.1:8787` and reuses the same pitch and tempo estimators as the
+browser pipeline. If the backend is unavailable, the app stays on browser
+processing and reports the error.
+
+When the app is served from localhost with the local backend running, Pattern
+Entry can save custom practice patterns to `.kaman/custom-patterns.json`.
+Custom patterns are loaded on restart and can be deleted from the pattern list.
+This save/delete feature is disabled for the static GitHub Pages build.
+Adjacent repeated notes in Pattern Entry are saved as one held note, so two
+eighth slots become a quarter note, four eighth slots become a half note, and
+so on.
+
 ## Build
 
 ```bash

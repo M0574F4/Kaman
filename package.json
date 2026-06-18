@@ -6,14 +6,22 @@
   "type": "module",
   "scripts": {
     "dev": "sh -c 'trap \"kill 0\" EXIT; npm run export:watch & vite'",
+    "backend": "vite-node server/audio-backend.ts",
+    "basic-pitch-backend": "tools/basic_pitch_bench/.venv/bin/python tools/basic_pitch_bench/basic_pitch_openvino_server.py",
+    "dev:backend": "sh -c 'trap \"kill 0\" EXIT; npm run backend & npm run dev'",
     "build": "tsc -b && vite build",
     "export:watch": "vite build --watch",
     "export:once": "vite build",
     "preview": "vite preview",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "@spotify/basic-pitch": "^1.0.1"
   }
 }

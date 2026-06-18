@@ -1,7 +1,14 @@
 import type { NoteEvent, TempoDebugFrame } from "../audio/types";
 import type { LiveViewModel } from "../modes/live-mode";
 
-export type AppMode = "live" | "practice" | "tuning" | "sequence" | "sheet-entry" | "spectrum";
+export type AppMode =
+  | "live"
+  | "practice"
+  | "tuning"
+  | "sequence"
+  | "sheet-entry"
+  | "spectrum"
+  | "ai-probe";
 export type PracticeTempoStatus =
   | "idle"
   | "insufficient"

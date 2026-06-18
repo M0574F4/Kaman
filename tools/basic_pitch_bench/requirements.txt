@@ -1,0 +1,4 @@
+basic-pitch[onnx]
+onnxruntime
+openvino
+numpy

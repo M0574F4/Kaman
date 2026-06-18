@@ -1,5 +1,10 @@
 import type { InstrumentStringName, PitchFrame, SpectrumFrame } from "../audio/types";
 import { midiToScientific, midiToSolfege } from "../notation/solfege";
+import {
+  DEFAULT_INSTRUMENT_STRINGS,
+  instrumentStringLabel,
+} from "../shared/instrument-profile";
+import { midiToFrequency } from "../shared/music";
 
 export const SPECTRUM_MIN_FREQ_HZ = 180;
 export const SPECTRUM_MAX_FREQ_HZ = 2800;
@@ -8,12 +13,9 @@ const TIME_WINDOW_MS = 6500;
 const MIN_COLUMN_MS = 18;
 const DB_FLOOR = -92;
 const DB_CEILING = -22;
-const OPEN_STRING_FREQUENCIES: Record<InstrumentStringName, number> = {
-  G: 196,
-  D: 293.66,
-  A: 440,
-  E: 659.25,
-};
+const OPEN_STRING_FREQUENCIES = new Map<InstrumentStringName, number>(
+  DEFAULT_INSTRUMENT_STRINGS.map((string) => [string.id, string.openHz]),
+);
 const AXIS_MIDI_LABELS = [55, 62, 69, 76, 81, 88, 93, 100];
 
 export class LiveSpectrogramRenderer {
@@ -150,7 +152,7 @@ export function renderSpectrumSummary(frame: PitchFrame | null, minBleedScore: n
   const bleedRatio = frame.adjacentBleedRatio ?? 0;
   const bleedText =
     frame.bleedString && bleedRatio >= minBleedScore
-      ? `Bleed overlay: ${frame.bleedString} string at ${Math.round(bleedRatio * 100)}%.`
+      ? `Bleed overlay: ${instrumentStringLabel(frame.bleedString)} string at ${Math.round(bleedRatio * 100)}%.`
       : "Bleed overlay: clean or below threshold.";
   const pitchText = frame.freqHz
     ? `Detected ${frame.freqHz.toFixed(1)} Hz (${frame.midi !== null ? midiToSolfege(frame.midi) : "-"}).`
@@ -191,7 +193,10 @@ function renderBleedGuides(
   bleedRatio: number,
   minBleedScore: number,
 ): string {
-  const baseFrequencyHz = OPEN_STRING_FREQUENCIES[stringName];
+  const baseFrequencyHz = OPEN_STRING_FREQUENCIES.get(stringName);
+  if (baseFrequencyHz === undefined) {
+    return "";
+  }
   const intensity = clamp(
     (bleedRatio - minBleedScore) / (0.49 - minBleedScore),
     0,
@@ -205,7 +210,7 @@ function renderBleedGuides(
     }
     const topPct = frequencyToTopPct(frequencyHz);
     const alpha = 0.2 + intensity * (harmonic === 1 ? 0.62 : 0.34);
-    const label = harmonic === 1 ? `${stringName} bleed` : "";
+    const label = harmonic === 1 ? `${instrumentStringLabel(stringName)} bleed` : "";
     html += `
       <div class="spectrum-bleed-band" style="top:${topPct.toFixed(2)}%; --bleed-alpha:${alpha.toFixed(3)};">
         <span>${label}</span>
@@ -237,10 +242,6 @@ function colorForEnergy(energy: number): string {
   const red = Math.round(120 + energy * 135);
   const green = Math.round(125 + energy * 90);
   return `rgb(${red}, ${green}, 76)`;
-}
-
-function midiToFrequency(midi: number): number {
-  return 440 * 2 ** ((midi - 69) / 12);
 }
 
 function frequencyToTopPct(frequencyHz: number): number {
