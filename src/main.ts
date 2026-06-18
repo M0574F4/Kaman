@@ -1173,6 +1173,7 @@ function mountUi(): void {
     resetPracticeAnalysis();
     practicePatternLastScrolledRow = -1;
     stopPracticePatternPlayback(true);
+    stopSheetPlayback(true);
     setPracticeBpm(practicePatternTempoRamp.initialBpm, true);
     scheduleRender();
   });
@@ -1247,6 +1248,7 @@ function mountUi(): void {
   noteEntryTimeSignatureSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     sheetEntryTimeSignature = asTimeSignature(target.value);
+    stopSheetPlayback(true);
     syncSheetEntryTiming();
     syncPatternEntryPracticeResults();
     scheduleRender();
@@ -1255,6 +1257,7 @@ function mountUi(): void {
   noteEntrySlotValueSelect.addEventListener("change", (event) => {
     const target = event.target as HTMLSelectElement;
     sheetEntrySlotValue = asSheetEntrySlotValue(target.value);
+    stopSheetPlayback(true);
     syncSheetEntryTiming();
     syncPatternEntryPracticeResults();
     scheduleRender();
@@ -1264,6 +1267,7 @@ function mountUi(): void {
     const target = event.target as HTMLInputElement;
     sheetEntryBars = clamp(parseInt(target.value || "1", 10), 1, MAX_SHEET_ENTRY_BARS);
     target.value = String(sheetEntryBars);
+    stopSheetPlayback(true);
     syncSheetEntryTiming();
     syncPatternEntryPracticeResults();
     scheduleRender();
@@ -1277,6 +1281,7 @@ function mountUi(): void {
 
   noteEntryClearBtn.addEventListener("click", () => {
     stopPracticePatternPlayback(true);
+    stopSheetPlayback(true);
     sheetEntrySlots = createEmptySheetSlots(sheetEntrySlotCount);
     syncPatternEntryPracticeResults();
     scheduleRender();
@@ -1303,6 +1308,7 @@ function mountUi(): void {
     const target = event.target as HTMLInputElement;
     tuningStringCount = clamp(parseInt(target.value || "4", 10), 1, 8);
     target.value = String(tuningStringCount);
+    stopSheetPlayback(true);
     resizeTuningSlots(tuningStringCount);
     resetTuningSession();
     scheduleRender();
@@ -1677,9 +1683,7 @@ function render(): void {
   const sheetPlaybackHasNotes = sheetPlaybackSteps.some((step) => step.midi !== null);
   ui.sheetPlaybackControls.style.display = sheetPlaybackVisible ? "inline-flex" : "none";
   ui.sheetPlaybackInstrumentSelect.value = sheetPlaybackInstrument;
-  ui.sheetPlaybackBtn.disabled = sheetPlaybackVisible && !sheetPlaybackPlaying
-    ? !sheetPlaybackHasNotes
-    : true;
+  ui.sheetPlaybackBtn.disabled = !sheetPlaybackVisible || (!sheetPlaybackPlaying && !sheetPlaybackHasNotes);
   ui.sheetPlaybackBtn.textContent = sheetPlaybackPlaying ? "■ Stop" : "▶ Sheet";
   ui.sheetPlaybackBtn.setAttribute(
     "aria-label",
@@ -3423,6 +3427,9 @@ function setPracticeBpm(nextBpm: number, resetTempo: boolean): void {
   const bpm = clamp(Math.round(nextBpm), 30, 240);
   if (bpm === sequenceSettings.bpm) {
     return;
+  }
+  if (sheetPlaybackPlaying) {
+    stopSheetPlayback(true);
   }
   sequenceSettings.bpm = bpm;
   state.practice.targetBpm = bpm;
