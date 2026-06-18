@@ -5402,6 +5402,7 @@ function onModeChange(event: Event): void {
                 ? "ai-probe"
                 : "live";
   resetMetronomeClock();
+  stopSheetPlayback(true);
   pipeline?.resetTempo();
   syncStringPurityPipeline();
 
@@ -6490,6 +6491,7 @@ function handleStaffSheetEntryClick(event: MouseEvent | PointerEvent): void {
   if (state.mode === "practice") {
     stopPracticePatternPlayback(true);
   }
+  stopSheetPlayback(true);
 
   const clickedSlot = (event.target as Element | null)?.closest<HTMLElement>(
     ".sheet-entry-slot[data-slot-index]",
@@ -6564,6 +6566,7 @@ function removeSheetEntrySlotFromDoubleClick(event: MouseEvent | PointerEvent): 
   if (state.mode === "practice") {
     stopPracticePatternPlayback(true);
   }
+  stopSheetPlayback(true);
   sheetEntrySlots[slotIndex] = null;
   lastSheetEntryClick = null;
   syncPatternEntryPracticeResults();
@@ -6577,6 +6580,7 @@ function handleTuningSheetClick(event: MouseEvent | PointerEvent): void {
   }
 
   clearTuningAdvanceTimer();
+  stopSheetPlayback(true);
   const clickedSlot = (event.target as Element | null)?.closest<HTMLElement>(
     ".tuning-slot[data-slot-index]",
   ) ?? null;
