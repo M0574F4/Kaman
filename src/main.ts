@@ -4884,72 +4884,87 @@ async function playMetronomeClick(accent: "strong" | "medium" | "weak"): Promise
   osc.stop(startAt + 0.055);
 }
 
-async function playNoteAudition(midi: number): Promise<void> {
-  const normalizedMidi = Math.round(clamp(midi, 0, 127));
-  const frequency = midiToFrequency(normalizedMidi);
-  if (!Number.isFinite(frequency) || frequency <= 0) {
+async function onToggleSheetPlayback(): Promise<void> {
+  if (sheetPlaybackPlaying) {
+    stopSheetPlayback(true);
+    return;
+  }
+  await startSheetPlayback();
+}
+
+async function startSheetPlayback(): Promise<void> {
+  const steps = currentSheetPlaybackSteps().filter((step) => step.durationBeats > 0);
+  if (!steps.some((step) => step.midi !== null)) {
     return;
   }
 
+  const instrument = sheetPlaybackInstrument;
   setAudioSessionType(state.listening ? "play-and-record" : "playback");
   const ctx = await ensureSharedAudioContext();
-  stopActiveNoteAudition(0.025);
+  stopSheetPlayback(false);
 
-  const startAt = ctx.currentTime + 0.012;
-  const durationSec = 1.42;
-  const releaseSec = 0.34;
-  const stopAt = startAt + durationSec + releaseSec + 0.08;
-
+  const startAt = ctx.currentTime + 0.035;
+  const beatSec = 60 / clamp(sequenceSettings.bpm, 30, 240);
   const master = ctx.createGain();
   const compressor = ctx.createDynamicsCompressor();
   compressor.threshold.setValueAtTime(-24, startAt);
   compressor.knee.setValueAtTime(18, startAt);
-  compressor.ratio.setValueAtTime(3.2, startAt);
+  compressor.ratio.setValueAtTime(instrument === "piano" ? 2.4 : 3.2, startAt);
   compressor.attack.setValueAtTime(0.004, startAt);
-  compressor.release.setValueAtTime(0.16, startAt);
-
+  compressor.release.setValueAtTime(instrument === "piano" ? 0.24 : 0.16, startAt);
+  master.gain.setValueAtTime(instrument === "piano" ? 0.78 : 0.95, startAt);
   master.connect(compressor);
   compressor.connect(ctx.destination);
-  master.gain.setValueAtTime(0.0001, startAt);
-  master.gain.exponentialRampToValueAtTime(0.24, startAt + 0.075);
-  master.gain.exponentialRampToValueAtTime(0.18, startAt + 0.28);
-  master.gain.setValueAtTime(0.18, startAt + durationSec);
-  master.gain.exponentialRampToValueAtTime(0.0001, startAt + durationSec + releaseSec);
 
-  const sourceBus = ctx.createGain();
-  sourceBus.gain.setValueAtTime(0.82, startAt);
-  connectViolinBody(ctx, sourceBus, master, frequency, startAt);
+  const sources: AudioScheduledSourceNode[] = [];
+  let cursor = startAt;
+  for (const step of steps) {
+    const durationSec = clamp(step.durationBeats * beatSec, 0.08, 8);
+    if (step.midi !== null) {
+      if (instrument === "piano") {
+        schedulePianoNote(ctx, master, step.midi, cursor, durationSec, sources);
+      } else {
+        scheduleViolinNote(ctx, master, step.midi, cursor, durationSec, sources);
+      }
+    }
+    cursor += durationSec;
+  }
 
-  const vibrato = ctx.createOscillator();
-  const vibratoDepth = ctx.createGain();
-  vibrato.type = "sine";
-  vibrato.frequency.setValueAtTime(5.4, startAt);
-  vibratoDepth.gain.setValueAtTime(0, startAt);
-  vibratoDepth.gain.linearRampToValueAtTime(10, startAt + 0.32);
-  vibrato.connect(vibratoDepth);
-
-  const sources: AudioScheduledSourceNode[] = [vibrato];
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "sawtooth", 0.62, 0, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "triangle", 0.22, -5, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 2, "sine", 0.18, 3, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 3, "sine", 0.1, -4, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 4, "sine", 0.045, 6, startAt, stopAt, sources);
-  addBowNoise(ctx, sourceBus, durationSec + releaseSec, startAt, stopAt, sources);
-
-  vibrato.start(startAt);
-  vibrato.stop(stopAt);
-  activeNoteAudition = { gain: master, sources };
+  const releaseTailSec = instrument === "piano" ? 1.15 : 0.36;
+  activeSheetPlayback = { gain: master, sources };
+  sheetPlaybackPlaying = true;
+  if (sheetPlaybackStopTimer !== null) {
+    window.clearTimeout(sheetPlaybackStopTimer);
+  }
+  sheetPlaybackStopTimer = window.setTimeout(() => {
+    sheetPlaybackStopTimer = null;
+    activeSheetPlayback = null;
+    sheetPlaybackPlaying = false;
+    scheduleRender();
+  }, Math.max(0, (cursor + releaseTailSec - ctx.currentTime) * 1000));
+  scheduleRender();
 }
 
-function stopActiveNoteAudition(releaseSec = 0.08): void {
-  if (!activeNoteAudition) {
+function stopSheetPlayback(fade = true): void {
+  if (sheetPlaybackStopTimer !== null) {
+    window.clearTimeout(sheetPlaybackStopTimer);
+    sheetPlaybackStopTimer = null;
+  }
+
+  const playback = activeSheetPlayback;
+  activeSheetPlayback = null;
+  sheetPlaybackPlaying = false;
+  if (!playback) {
+    scheduleRender();
     return;
   }
 
-  const { gain, sources } = activeNoteAudition;
+  const { gain, sources } = playback;
   const now = gain.context.currentTime;
+  const releaseSec = fade ? 0.08 : 0.012;
   gain.gain.cancelScheduledValues(now);
-  gain.gain.setTargetAtTime(0.0001, now, Math.max(0.01, releaseSec / 3));
+  gain.gain.setValueAtTime(Math.max(0.0001, gain.gain.value), now);
+  gain.gain.setTargetAtTime(0.0001, now, Math.max(0.006, releaseSec / 3));
   for (const source of sources) {
     try {
       source.stop(now + releaseSec);
@@ -4957,7 +4972,203 @@ function stopActiveNoteAudition(releaseSec = 0.08): void {
       // Already stopped by its original schedule.
     }
   }
-  activeNoteAudition = null;
+  scheduleRender();
+}
+
+function isSheetPlaybackMode(): boolean {
+  return state.mode === "practice" || state.mode === "sheet-entry" || state.mode === "tuning";
+}
+
+function asSheetPlaybackInstrument(value: string): SheetPlaybackInstrument {
+  return value === "piano" ? "piano" : "violin";
+}
+
+function currentSheetPlaybackSteps(): SheetPlaybackStep[] {
+  if (state.mode === "sheet-entry" || (state.mode === "practice" && isPatternEntrySelected())) {
+    return sheetEntryPlaybackSteps();
+  }
+  if (state.mode === "practice") {
+    return selectedPracticePattern().notes.map((note) => ({
+      midi: clamp(Math.round(note.midi), 0, 127),
+      durationBeats: practicePatternNoteDurationBeats(note),
+    }));
+  }
+  if (state.mode === "tuning") {
+    return tuningTargets().map((target) => ({
+      midi: clamp(Math.round(target.slot.midi), 0, 127),
+      durationBeats: 1,
+    }));
+  }
+  return [];
+}
+
+function sheetEntryPlaybackSteps(): SheetPlaybackStep[] {
+  resizeSheetEntrySlots(sheetEntrySlotCount);
+  const slotBeats = normalizePracticeNoteDurationBeats(
+    sheetEntrySlotDurationBeats(sheetEntrySlotValue),
+  );
+  const steps: SheetPlaybackStep[] = [];
+  for (const slot of sheetEntrySlots) {
+    const midi = slot ? clamp(Math.round(slot.midi), 0, 127) : null;
+    const previous = steps[steps.length - 1];
+    if (previous && previous.midi === midi) {
+      previous.durationBeats += slotBeats;
+    } else {
+      steps.push({ midi, durationBeats: slotBeats });
+    }
+  }
+  return trimSilentSheetPlaybackEdges(steps);
+}
+
+function trimSilentSheetPlaybackEdges(steps: SheetPlaybackStep[]): SheetPlaybackStep[] {
+  let start = 0;
+  let end = steps.length;
+  while (start < end && steps[start].midi === null) {
+    start += 1;
+  }
+  while (end > start && steps[end - 1].midi === null) {
+    end -= 1;
+  }
+  return steps.slice(start, end);
+}
+
+function scheduleViolinNote(
+  ctx: AudioContext,
+  destination: AudioNode,
+  midi: number,
+  startAt: number,
+  durationSec: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const normalizedMidi = Math.round(clamp(midi, 0, 127));
+  const frequency = midiToFrequency(normalizedMidi);
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return;
+  }
+
+  const duration = Math.max(0.08, durationSec);
+  const attackSec = Math.min(0.085, duration * 0.45);
+  const releaseSec = clamp(duration * 0.42, 0.12, 0.3);
+  const noteEndAt = startAt + duration;
+  const bodyAt = Math.min(noteEndAt, startAt + Math.max(attackSec + 0.02, duration * 0.68));
+  const stopAt = noteEndAt + releaseSec + 0.08;
+  const noteGain = ctx.createGain();
+  noteGain.connect(destination);
+  noteGain.gain.setValueAtTime(0.0001, startAt);
+  noteGain.gain.exponentialRampToValueAtTime(0.24, startAt + attackSec);
+  noteGain.gain.exponentialRampToValueAtTime(0.18, bodyAt);
+  noteGain.gain.setValueAtTime(0.18, noteEndAt);
+  noteGain.gain.exponentialRampToValueAtTime(0.0001, noteEndAt + releaseSec);
+
+  const sourceBus = ctx.createGain();
+  sourceBus.gain.setValueAtTime(0.82, startAt);
+  connectViolinBody(ctx, sourceBus, noteGain, frequency, startAt);
+
+  const vibrato = ctx.createOscillator();
+  const vibratoDepth = ctx.createGain();
+  vibrato.type = "sine";
+  vibrato.frequency.setValueAtTime(5.4, startAt);
+  vibratoDepth.gain.setValueAtTime(0, startAt);
+  vibratoDepth.gain.linearRampToValueAtTime(9.5, startAt + Math.min(0.32, duration * 0.8));
+  vibrato.connect(vibratoDepth);
+
+  sources.push(vibrato);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "sawtooth", 0.62, 0, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "triangle", 0.22, -5, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 2, "sine", 0.18, 3, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 3, "sine", 0.1, -4, startAt, stopAt, sources);
+  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 4, "sine", 0.045, 6, startAt, stopAt, sources);
+  addBowNoise(ctx, sourceBus, duration + releaseSec, startAt, stopAt, sources);
+
+  vibrato.start(startAt);
+  vibrato.stop(stopAt);
+}
+
+function schedulePianoNote(
+  ctx: AudioContext,
+  destination: AudioNode,
+  midi: number,
+  startAt: number,
+  durationSec: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const normalizedMidi = Math.round(clamp(midi, 0, 127));
+  const frequency = midiToFrequency(normalizedMidi);
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return;
+  }
+
+  const duration = Math.max(0.12, durationSec);
+  const stopAt = startAt + clamp(duration + 1.05, 0.9, 3.4);
+  const noteGain = ctx.createGain();
+  noteGain.gain.setValueAtTime(0.8, startAt);
+  noteGain.connect(destination);
+
+  const partials: Array<{
+    harmonic: number;
+    level: number;
+    detune: number;
+    decay: number;
+    type: OscillatorType;
+  }> = [
+    { harmonic: 1, level: 0.54, detune: 0, decay: 1.65, type: "triangle" },
+    { harmonic: 2, level: 0.22, detune: 2.5, decay: 1.18, type: "sine" },
+    { harmonic: 3, level: 0.12, detune: -3, decay: 0.88, type: "sine" },
+    { harmonic: 4, level: 0.07, detune: 4, decay: 0.62, type: "sine" },
+    { harmonic: 6, level: 0.032, detune: -5, decay: 0.42, type: "sine" },
+  ];
+
+  for (const partial of partials) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const decayAt = startAt + Math.min(stopAt - startAt - 0.02, Math.max(partial.decay, duration * 0.7));
+    osc.type = partial.type;
+    osc.frequency.setValueAtTime(frequency * partial.harmonic, startAt);
+    osc.detune.setValueAtTime(partial.detune, startAt);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.linearRampToValueAtTime(partial.level, startAt + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, decayAt);
+    osc.connect(gain);
+    gain.connect(noteGain);
+    osc.start(startAt);
+    osc.stop(stopAt);
+    sources.push(osc);
+  }
+
+  addPianoHammerNoise(ctx, noteGain, startAt, Math.min(stopAt, startAt + 0.09), sources);
+}
+
+function addPianoHammerNoise(
+  ctx: AudioContext,
+  destination: AudioNode,
+  startAt: number,
+  stopAt: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const frameCount = Math.ceil(ctx.sampleRate * Math.max(0.035, stopAt - startAt));
+  const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < frameCount; i += 1) {
+    const t = i / Math.max(1, frameCount - 1);
+    data[i] = (Math.random() * 2 - 1) * (1 - t) ** 2;
+  }
+
+  const noise = ctx.createBufferSource();
+  const filter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  noise.buffer = buffer;
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(2400, startAt);
+  filter.Q.setValueAtTime(1.4, startAt);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.linearRampToValueAtTime(0.06, startAt + 0.004);
+  gain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(destination);
+  noise.start(startAt);
+  noise.stop(stopAt);
+  sources.push(noise);
 }
 
 function addViolinOscillator(
@@ -5049,11 +5260,13 @@ function addBowNoise(
   filter.type = "bandpass";
   filter.frequency.setValueAtTime(3200, startAt);
   filter.Q.setValueAtTime(0.65, startAt);
+  const attackAt = Math.min(stopAt - 0.08, startAt + 0.05);
+  const sustainAt = Math.min(stopAt - 0.055, startAt + Math.max(0.08, durationSec * 0.7));
+  const releaseAt = Math.max(sustainAt + 0.006, stopAt - 0.04);
   gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.linearRampToValueAtTime(0.024, startAt + 0.05);
-  gain.gain.exponentialRampToValueAtTime(0.014, startAt + 0.24);
-  gain.gain.setValueAtTime(0.014, startAt + Math.max(0.26, durationSec - 0.18));
-  gain.gain.exponentialRampToValueAtTime(0.0001, stopAt - 0.04);
+  gain.gain.linearRampToValueAtTime(0.024, Math.max(startAt + 0.004, attackAt));
+  gain.gain.exponentialRampToValueAtTime(0.014, Math.max(attackAt + 0.004, sustainAt));
+  gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt);
   noise.connect(filter);
   filter.connect(gain);
   gain.connect(destination);

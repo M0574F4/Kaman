@@ -123,6 +123,45 @@ h2 {
   color: #a33a2d;
 }
 
+.sheet-playback-controls {
+  display: none;
+  align-items: center;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+}
+
+.sheet-playback-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.36rem;
+  color: #4f5d5e;
+  font-size: 0.86rem;
+}
+
+.sheet-playback-controls select {
+  padding: 0.38rem 0.55rem;
+  font-size: 0.86rem;
+}
+
+.sheet-playback-btn {
+  min-height: 2.2rem;
+  border-color: #1b4332;
+  background: #1b4332;
+  color: #fff;
+  font-weight: 800;
+}
+
+.sheet-playback-btn:hover,
+.sheet-playback-btn:focus-visible {
+  border-color: #2d6a4f;
+  background: #2d6a4f;
+}
+
+.sheet-playback-btn.playing {
+  border-color: #7a3e15;
+  background: #7a3e15;
+}
+
 button,
 select {
   border: 1px solid #d2c4af;
@@ -1648,44 +1687,6 @@ button.primary {
 
 .sheet-entry-note {
   transform: translate(-50%, -50%);
-}
-
-.note-audition-button {
-  position: absolute;
-  top: 1.62rem;
-  right: 0.12rem;
-  z-index: 8;
-  display: inline-grid;
-  place-items: center;
-  width: 1.32rem;
-  height: 1.32rem;
-  min-width: 1.32rem;
-  padding: 0;
-  border: 1px solid rgba(120, 101, 75, 0.36);
-  border-radius: 999px;
-  background: rgba(255, 253, 248, 0.94);
-  color: #1b4332;
-  font-size: 0.62rem;
-  line-height: 1;
-  box-shadow: 0 1px 4px rgba(48, 37, 20, 0.12);
-  opacity: 0.72;
-  transition:
-    background 120ms ease,
-    border-color 120ms ease,
-    opacity 120ms ease,
-    transform 120ms ease;
-}
-
-.note-audition-button:hover,
-.note-audition-button:focus-visible {
-  border-color: #2d6a4f;
-  background: #e9f4ee;
-  opacity: 1;
-  transform: scale(1.08);
-}
-
-.note-audition-button:active {
-  transform: scale(0.96);
 }
 
 .sheet-entry-accidental {
