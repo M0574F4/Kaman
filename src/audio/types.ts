@@ -6,6 +6,7 @@ export type PitchDetectionEngine = "autocorrelation" | "basic-pitch";
 
 export type PitchFrame = {
   tMs: number;
+  detectedAtMs?: number;
   freqHz: number | null;
   midiFloat: number | null;
   midi: number | null;

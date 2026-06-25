@@ -84,6 +84,16 @@ type SheetPlaybackInstrument = "violin" | "piano";
 type SheetPlaybackStep = {
   midi: number | null;
   durationBeats: number;
+  practiceNoteIndex?: number;
+  sheetSlotIndices?: number[];
+  tuningTargetIndex?: number;
+};
+
+type ActiveSheetPlayback = {
+  gain: GainNode;
+  sources: AudioScheduledSourceNode[];
+  steps: SheetPlaybackStep[];
+  timers: number[];
 };
 
 type BasicPitchProbeState = {
@@ -210,6 +220,8 @@ type PracticeAnalysisStep = {
   delayMs: number | null;
   firstPlayedMidi: number | null;
   wrongCounts: Map<number, number>;
+  bleedDetected: boolean;
+  bleedStringCounts: Map<InstrumentStringId, number>;
 };
 
 type PracticeAnalysisNoteAggregate = {
@@ -217,8 +229,12 @@ type PracticeAnalysisNoteAggregate = {
   targetLabel: string;
   expectedCount: number;
   heardCount: number;
+  correctCount: number;
+  errorCount: number;
+  bleedCount: number;
   delayMsValues: number[];
   wrongCounts: Map<number, number>;
+  bleedStringCounts: Map<InstrumentStringId, number>;
 };
 
 type PracticePatternPassDirection = "forward" | "backward";
@@ -430,10 +446,8 @@ let metronomeAudioContext: AudioContext | null = null;
 let sheetPlaybackInstrument: SheetPlaybackInstrument = "violin";
 let sheetPlaybackPlaying = false;
 let sheetPlaybackStopTimer: number | null = null;
-let activeSheetPlayback: {
-  gain: GainNode;
-  sources: AudioScheduledSourceNode[];
-} | null = null;
+let sheetPlaybackActiveStepIndex: number | null = null;
+let activeSheetPlayback: ActiveSheetPlayback | null = null;
 const isLikelyIOS = detectLikelyIOS();
 
 type NoteSnapshot = {
@@ -1864,6 +1878,9 @@ function render(): void {
   } else if (sheetEntryModeActive) {
     ui.staffBatchLayer.style.display = "block";
     ui.staffBatchLayer.innerHTML = renderStaffSheetEntry(false, nowMs);
+    if (sheetPlaybackPlaying) {
+      scrollPracticeSheetToActiveRow();
+    }
     ui.noteGroup.style.visibility = "hidden";
     ui.ledgerLayer.innerHTML = "";
     ui.trailLayer.innerHTML = "";
@@ -2659,6 +2676,7 @@ async function onTogglePracticePatternPlayback(): Promise<void> {
     stopPracticePatternPlayback(false);
     return;
   }
+  stopSheetPlayback(true);
 
   if (state.mode !== "practice") {
     state.mode = "practice";
@@ -2920,7 +2938,8 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
     return;
   }
 
-  const position = practicePatternCurrentPosition(frame.tMs);
+  const frameTimeMs = practicePatternFrameTimeMs(frame);
+  const position = practicePatternCurrentPosition(frameTimeMs);
   practicePatternActiveIndex = position?.noteIndex ?? null;
   if (!position) {
     return;
@@ -2929,13 +2948,30 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   markElapsedPracticePatternSteps(position);
   capturePracticePatternBleedFrame(frame);
 
-  const playedMidi =
-    state.live.detectedMidi ?? (frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null);
-  if (playedMidi === null) {
+  const rawPlayedMidi = frame.confidence >= liveSettings.confidenceThreshold ? frame.midi : null;
+  if (rawPlayedMidi === null) {
     return;
   }
 
-  const assignmentStepIndex = practicePatternAssignmentStepIndex(position, playedMidi);
+  const analysisStepIndex = practicePatternAnalysisStepIndex(position, rawPlayedMidi, frameTimeMs);
+  capturePracticeAnalysisBleedFrame(position, frame, analysisStepIndex);
+  const analysisNoteIndex = analysisStepIndex === null
+    ? position.noteIndex
+    : position.order[analysisStepIndex];
+  const analysisTarget = analysisNoteIndex === undefined
+    ? null
+    : selectedPracticePattern().notes[analysisNoteIndex];
+  if (analysisNoteIndex !== undefined && analysisTarget) {
+    recordPracticeAnalysisPlayed(
+      position,
+      analysisStepIndex,
+      analysisNoteIndex,
+      practicePlayedMidiForTarget(rawPlayedMidi, analysisTarget.midi),
+      frameTimeMs,
+    );
+  }
+
+  const assignmentStepIndex = practicePatternAssignmentStepIndex(position, rawPlayedMidi);
   if (assignmentStepIndex === null && position.stepElapsedMs < position.noteDurationMs * 0.12) {
     return;
   }
@@ -2952,6 +2988,7 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   if (!result || !target) {
     return;
   }
+  const playedMidi = practicePlayedMidiForTarget(rawPlayedMidi, target.midi);
 
   const bleedMidi = practiceBleedMidi(frame);
   if (bleedMidi !== null) {
@@ -2959,7 +2996,6 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   }
 
   const isCorrect = playedMidi === target.midi;
-  recordPracticeAnalysisPlayed(position, assignmentStepIndex, noteIndex, playedMidi, frame.tMs);
   if (!isCorrect) {
     if (result.status === "correct") {
       return;
@@ -2975,9 +3011,9 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   const frameDeltaMs =
     result.lastFrameMs === null
       ? 0
-      : clamp(frame.tMs - result.lastFrameMs, 0, Math.min(120, position.noteDurationMs));
+      : clamp(frameTimeMs - result.lastFrameMs, 0, Math.min(120, position.noteDurationMs));
   result.correctMs += frameDeltaMs;
-  result.lastFrameMs = frame.tMs;
+  result.lastFrameMs = frameTimeMs;
   if (result.correctMs >= requiredPracticeHoldMs(position.noteDurationMs)) {
     result.status = "correct";
     result.playedMidi = playedMidi;
@@ -2985,6 +3021,82 @@ function capturePracticePatternFrame(frame: PitchFrame): void {
   } else if (result.status === "pending") {
     result.playedMidi = playedMidi;
   }
+}
+
+function practicePatternFrameTimeMs(frame: PitchFrame): number {
+  return Number.isFinite(frame.detectedAtMs) ? frame.detectedAtMs! : frame.tMs;
+}
+
+function practicePatternAnalysisStepIndex(
+  position: PracticePatternPosition,
+  playedMidi: number,
+  playedAtMs: number,
+): number | null {
+  const passEndStepIndex = practicePatternPassEndStepIndex(position.cycleKey, position.order.length);
+  const candidates = [position.stepIndex, position.stepIndex - 1, position.stepIndex + 1];
+  let bestStepIndex: number | null = null;
+  let bestDistanceMs = Number.POSITIVE_INFINITY;
+
+  for (const stepIndex of candidates) {
+    if (stepIndex < position.passStartStepIndex || stepIndex >= passEndStepIndex) {
+      continue;
+    }
+    const noteIndex = position.order[stepIndex];
+    const target = noteIndex === undefined ? null : selectedPracticePattern().notes[noteIndex];
+    if (!target || !isPracticePlayedMidiForTarget(playedMidi, target.midi)) {
+      continue;
+    }
+
+    const expectedMs = practicePatternExpectedMsForStep(position, stepIndex);
+    const distanceMs = Math.abs(playedAtMs - expectedMs);
+    if (distanceMs > practicePatternAnalysisTimingWindowMs(position, stepIndex)) {
+      continue;
+    }
+    if (distanceMs < bestDistanceMs) {
+      bestDistanceMs = distanceMs;
+      bestStepIndex = stepIndex;
+    }
+  }
+
+  return bestStepIndex;
+}
+
+function practicePatternExpectedMsForStep(
+  position: PracticePatternPosition,
+  stepIndex: number,
+): number {
+  const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const stepStartBeats = practicePatternStepStartBeats(
+    position.order,
+    position.passStartStepIndex,
+    stepIndex,
+  );
+  return practicePatternPassStartedAtMs + stepStartBeats * beatDurationMs;
+}
+
+function practicePatternAnalysisTimingWindowMs(
+  position: PracticePatternPosition,
+  stepIndex: number,
+): number {
+  const beatDurationMs = practicePatternPassNoteDurationMs || practicePatternNoteDurationMs();
+  const stepDurationMs = practicePatternStepDurationBeats(position.order, stepIndex) * beatDurationMs;
+  return clamp(stepDurationMs * 0.45, 80, 450);
+}
+
+function practicePlayedMidiForTarget(playedMidi: number, targetMidi: number): number {
+  return isPracticePlayedMidiForTarget(playedMidi, targetMidi) ? targetMidi : playedMidi;
+}
+
+function isPracticePlayedMidiForTarget(playedMidi: number, targetMidi: number): boolean {
+  return playedMidi === targetMidi || isOpenStringHarmonicAlias(playedMidi, targetMidi);
+}
+
+function isOpenStringHarmonicAlias(playedMidi: number, targetMidi: number): boolean {
+  if (!DEFAULT_INSTRUMENT_STRINGS.some((string) => string.openMidi === targetMidi)) {
+    return false;
+  }
+  const interval = playedMidi - targetMidi;
+  return interval === 12 || interval === 19 || interval === 24;
 }
 
 function requiredPracticeHoldMs(noteDurationMs: number): number {
@@ -3041,10 +3153,37 @@ function ensurePracticeAnalysisStepForParts(
     delayMs: null,
     firstPlayedMidi: null,
     wrongCounts: new Map<number, number>(),
+    bleedDetected: false,
+    bleedStringCounts: new Map<InstrumentStringId, number>(),
   };
   practiceAnalysisStepMap.set(key, step);
   practiceAnalysisSteps.push(step);
   return step;
+}
+
+function capturePracticeAnalysisBleedFrame(
+  position: PracticePatternPosition,
+  frame: PitchFrame,
+  assignmentStepIndex: number | null,
+): void {
+  if (!isAudiblePracticeFrame(frame)) {
+    return;
+  }
+  const bleedRatio = frame.adjacentBleedRatio ?? 0;
+  if (bleedRatio < practiceBleedSensitivity) {
+    return;
+  }
+  const step = ensurePracticeAnalysisStep(position, assignmentStepIndex ?? position.stepIndex);
+  if (!step) {
+    return;
+  }
+  step.bleedDetected = true;
+  if (frame.bleedString) {
+    step.bleedStringCounts.set(
+      frame.bleedString,
+      Math.max(1, step.bleedStringCounts.get(frame.bleedString) ?? 0),
+    );
+  }
 }
 
 function recordPracticeAnalysisPlayed(
@@ -3118,7 +3257,7 @@ function practicePatternAssignmentStepIndex(
     }
     const target = selectedPracticePattern().notes[noteIndex];
     const result = practicePatternResults[noteIndex];
-    if (!target || !result || target.midi !== playedMidi) {
+    if (!target || !result || !isPracticePlayedMidiForTarget(playedMidi, target.midi)) {
       continue;
     }
     if (result.status === "pending") {
@@ -4215,8 +4354,11 @@ function practicePatternOverallFeedbackText(): string {
 
 function practicePatternSpecificPitchFeedback(): string | null {
   const wrongAggregate = practiceAnalysisNoteAggregates()
-    .sort((a, b) => wrongCountTotal(b.wrongCounts) - wrongCountTotal(a.wrongCounts))
-    .find((aggregate) => aggregate.wrongCounts.size > 0);
+    .sort((a, b) =>
+      practiceAnalysisErrorRate(b) - practiceAnalysisErrorRate(a) ||
+      b.errorCount - a.errorCount,
+    )
+    .find((aggregate) => aggregate.errorCount > 0);
   if (!wrongAggregate) {
     return null;
   }
@@ -4237,8 +4379,8 @@ function renderPracticeAnalysis(): string {
     .filter((delay): delay is number => delay !== null && Number.isFinite(delay));
   const playedCount = practiceAnalysisSteps.filter((step) => step.firstPlayedMidi !== null).length;
   const noteAggregates = practiceAnalysisNoteAggregates();
-  const wrongTotal = noteAggregates.reduce(
-    (sum, aggregate) => sum + wrongCountTotal(aggregate.wrongCounts),
+  const errorTotal = noteAggregates.reduce(
+    (sum, aggregate) => sum + aggregate.errorCount,
     0,
   );
   const meanDelay = delays.length === 0
@@ -4247,7 +4389,9 @@ function renderPracticeAnalysis(): string {
   const timingText = meanDelay === null
     ? "No confident note onsets yet"
     : `Average ${formatSigned(meanDelay)} ms | ${delays.length} onsets`;
-  const pitchText = `${noteAggregates.length} unique notes | ${playedCount}/${practiceAnalysisSteps.length} heard | ${wrongTotal} wrong-note event${wrongTotal === 1 ? "" : "s"}`;
+  const errorRateText = formatPracticeAnalysisRate(errorTotal, playedCount);
+  const pitchText =
+    `${noteAggregates.length} unique notes | ${playedCount}/${practiceAnalysisSteps.length} heard | ${errorRateText} error rate (${errorTotal}/${playedCount || 0})`;
 
   return `
     <div class="practice-analysis-summary">
@@ -4265,7 +4409,7 @@ function renderPracticeAnalysis(): string {
     <div class="practice-analysis-block">
       <div class="practice-analysis-heading">
         <span>Pitch analysis</span>
-        <small>black is expected; red is mistaken played pitch</small>
+        <small>errors first; bleed below</small>
       </div>
       ${renderPracticePitchAnalysisSheet(noteAggregates)}
     </div>
@@ -4282,8 +4426,12 @@ function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
         targetLabel: step.targetLabel,
         expectedCount: 0,
         heardCount: 0,
+        correctCount: 0,
+        errorCount: 0,
+        bleedCount: 0,
         delayMsValues: [],
         wrongCounts: new Map<number, number>(),
+        bleedStringCounts: new Map<InstrumentStringId, number>(),
       };
       byTargetMidi.set(step.targetMidi, aggregate);
     }
@@ -4291,6 +4439,14 @@ function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
     aggregate.expectedCount += 1;
     if (step.firstPlayedMidi !== null) {
       aggregate.heardCount += 1;
+      if (step.firstPlayedMidi === step.targetMidi) {
+        aggregate.correctCount += 1;
+      } else {
+        aggregate.errorCount += 1;
+      }
+    }
+    if (step.bleedDetected) {
+      aggregate.bleedCount += 1;
     }
     if (step.delayMs !== null && Number.isFinite(step.delayMs)) {
       aggregate.delayMsValues.push(step.delayMs);
@@ -4304,9 +4460,29 @@ function practiceAnalysisNoteAggregates(): PracticeAnalysisNoteAggregate[] {
         (aggregate.wrongCounts.get(wrongMidi) ?? 0) + count,
       );
     }
+    for (const [bleedString, count] of step.bleedStringCounts.entries()) {
+      aggregate.bleedStringCounts.set(
+        bleedString,
+        (aggregate.bleedStringCounts.get(bleedString) ?? 0) + count,
+      );
+    }
   }
 
   return [...byTargetMidi.values()].sort((a, b) => a.targetMidi - b.targetMidi);
+}
+
+function practiceAnalysisErrorRate(aggregate: PracticeAnalysisNoteAggregate): number {
+  if (aggregate.heardCount === 0) {
+    return 0;
+  }
+  return aggregate.errorCount / aggregate.heardCount;
+}
+
+function formatPracticeAnalysisRate(count: number, total: number): string {
+  if (total <= 0) {
+    return "-";
+  }
+  return `${Math.round((count / total) * 100)}%`;
 }
 
 function wrongCountTotal(counts: Map<number, number>): number {
@@ -4355,17 +4531,16 @@ function renderPracticeDelayHistogram(delays: number[]): string {
 }
 
 function renderPracticePitchAnalysisSheet(noteAggregates: PracticeAnalysisNoteAggregate[]): string {
-  const rowCount = Math.max(1, Math.ceil(noteAggregates.length / PRACTICE_PATTERN_NOTES_PER_ROW));
+  const notesPerHalf = Math.max(1, Math.floor(PRACTICE_PATTERN_NOTES_PER_ROW / 2));
+  const rowCount = Math.max(1, Math.ceil(noteAggregates.length / notesPerHalf));
   const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
-    const startIndex = rowIndex * PRACTICE_PATTERN_NOTES_PER_ROW;
-    const rowNotes = noteAggregates.slice(startIndex, startIndex + PRACTICE_PATTERN_NOTES_PER_ROW);
-    const slots = rowNotes.map((aggregate) => renderPracticeAnalysisSlot(aggregate, rowIndex)).join("");
-    const placeholders = Array.from(
-      { length: PRACTICE_PATTERN_NOTES_PER_ROW - rowNotes.length },
-      () => `<div class="practice-pattern-slot placeholder"></div>`,
-    ).join("");
+    const startIndex = rowIndex * notesPerHalf;
+    const rowNotes = noteAggregates.slice(startIndex, startIndex + notesPerHalf);
+    const errorSlots = renderPracticeAnalysisHalfSlots(rowNotes, rowIndex, "error", notesPerHalf);
+    const bleedSlots = renderPracticeAnalysisHalfSlots(rowNotes, rowIndex, "bleed", notesPerHalf);
+
     return `
-      <div class="practice-sheet-row analysis-row has-clef" data-row-index="${rowIndex}">
+      <div class="practice-sheet-row analysis-row analysis-paired-row has-clef" data-row-index="${rowIndex}">
         ${renderStaffClef()}
         <div class="practice-sheet-lines">
           <div class="staff-line l1"></div>
@@ -4374,49 +4549,112 @@ function renderPracticePitchAnalysisSheet(noteAggregates: PracticeAnalysisNoteAg
           <div class="staff-line l4"></div>
           <div class="staff-line l5"></div>
         </div>
-        <div class="practice-pattern-grid" style="--pattern-cols:${PRACTICE_PATTERN_NOTES_PER_ROW}">
-          ${slots}${placeholders}
+        <div class="practice-analysis-pair-grid" style="--analysis-half-cols:${notesPerHalf}">
+          <div class="practice-analysis-half analysis-error-half" data-analysis-mode="error">
+            <div class="practice-pattern-grid" style="--pattern-cols:${notesPerHalf}">
+              ${errorSlots}
+            </div>
+          </div>
+          <div class="practice-analysis-pair-gap" aria-hidden="true"></div>
+          <div class="practice-analysis-half analysis-bleed-half" data-analysis-mode="bleed">
+            <div class="practice-pattern-grid" style="--pattern-cols:${notesPerHalf}">
+              ${bleedSlots}
+            </div>
+          </div>
         </div>
       </div>
     `;
   }).join("");
 
-  return `<div class="practice-analysis-sheet practice-sheet">${rows}</div>`;
+  return `
+    <div class="practice-analysis-sheet practice-sheet">
+      ${rows}
+    </div>
+  `;
 }
 
-function renderPracticeAnalysisSlot(aggregate: PracticeAnalysisNoteAggregate, rowIndex: number): string {
+function renderPracticeAnalysisHalfSlots(
+  rowNotes: PracticeAnalysisNoteAggregate[],
+  rowIndex: number,
+  mode: "error" | "bleed",
+  notesPerHalf: number,
+): string {
+  const slots = rowNotes
+    .map((aggregate) => renderPracticeAnalysisSlot(aggregate, rowIndex, mode))
+    .join("");
+  const placeholders = Array.from(
+    { length: notesPerHalf - rowNotes.length },
+    () => `<div class="practice-pattern-slot placeholder"></div>`,
+  ).join("");
+
+  return `${slots}${placeholders}`;
+}
+
+function renderPracticeAnalysisSlot(
+  aggregate: PracticeAnalysisNoteAggregate,
+  rowIndex: number,
+  mode: "error" | "bleed",
+): string {
   const y = midiToStaffY(aggregate.targetMidi);
-  const totalErrors = wrongCountTotal(aggregate.wrongCounts);
   const ledgers = ledgerLineYs(aggregate.targetMidi)
     .map((lineY) => `<div class="practice-pattern-ledger-line" style="top:${lineY.toFixed(1)}px"></div>`)
     .join("");
   const stemDirection = stemDirectionForMidi(aggregate.targetMidi);
+  const maxWrongCount = Math.max(1, wrongCountTotal(aggregate.wrongCounts));
   const wrongNotes = [...aggregate.wrongCounts.entries()]
     .sort(([a], [b]) => b - a)
     .map(([midi, count]) =>
-      renderPracticeAnalysisWrongNote(midi, count, Math.max(1, wrongCountTotal(aggregate.wrongCounts))),
+      renderPracticeAnalysisWrongNote(midi, count, maxWrongCount),
     )
+    .join("");
+  const bleedNotes = [...aggregate.bleedStringCounts.entries()]
+    .sort(([, a], [, b]) => b - a)
+    .map(([stringId, count]) => {
+      const bleedMidi = openStringMidi(stringId);
+      return bleedMidi === null
+        ? ""
+        : renderPracticeAnalysisBleedNote(bleedMidi, stringId, count, Math.max(1, aggregate.bleedCount));
+    })
     .join("");
   const meanDelay = aggregate.delayMsValues.length === 0
     ? null
     : aggregate.delayMsValues.reduce((sum, delay) => sum + delay, 0) / aggregate.delayMsValues.length;
   const delay = meanDelay === null ? "" : `${formatSigned(meanDelay)} ms avg`;
   const label = `${midiToScientific(aggregate.targetMidi)} | ${midiToSolfege(aggregate.targetMidi)} | ${instrumentPositionText(aggregate.targetMidi)}`;
-  const errorText = totalErrors === 0
-    ? ""
-    : `${totalErrors} error${totalErrors === 1 ? "" : "s"}`;
+  const errorRateText = formatPracticeAnalysisRate(aggregate.errorCount, aggregate.heardCount);
+  const bleedRateText = formatPracticeAnalysisRate(aggregate.bleedCount, aggregate.heardCount);
+  const isBleedMode = mode === "bleed";
+  const rateText = aggregate.heardCount === 0
+    ? "-"
+    : isBleedMode
+      ? `${bleedRateText} bleed`
+      : `${errorRateText} error`;
+  const detailText = isBleedMode
+    ? `${aggregate.bleedCount}/${aggregate.heardCount || 0} with bleed`
+    : `${aggregate.heardCount}/${aggregate.expectedCount} · ${delay || "-"}`;
+  const rateLabel =
+    `${aggregate.correctCount}/${aggregate.heardCount || 0} correct, ${aggregate.errorCount}/${aggregate.heardCount || 0} errors, ${aggregate.bleedCount}/${aggregate.heardCount || 0} with bleed`;
+  const rateClass = aggregate.heardCount === 0
+    ? "no-attempts"
+    : isBleedMode
+      ? aggregate.bleedCount > 0
+        ? "has-bleed"
+        : "no-bleed"
+      : aggregate.errorCount > 0
+        ? "has-errors"
+        : "no-errors";
 
   return `
-    <div class="practice-pattern-slot analysis-slot" data-row-index="${rowIndex}">
+    <div class="practice-pattern-slot analysis-slot analysis-${mode}-slot" data-row-index="${rowIndex}">
       ${ledgers}
       <div class="staff-batch-note value-quarter practice-analysis-target-note ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${label}">
         <div class="staff-batch-note-head"></div>
         <div class="staff-batch-note-stem"></div>
       </div>
-      ${wrongNotes}
+      ${isBleedMode ? bleedNotes : wrongNotes}
       <div class="practice-pattern-target" title="${label}">${midiToScientific(aggregate.targetMidi)}</div>
-      <div class="practice-pattern-played">${aggregate.heardCount}/${aggregate.expectedCount} · ${delay || "-"}</div>
-      <div class="practice-analysis-errors">${errorText}</div>
+      <div class="practice-pattern-played">${detailText}</div>
+      <div class="practice-analysis-errors ${rateClass}" title="${rateLabel}">${rateText}</div>
     </div>
   `;
 }
@@ -4429,6 +4667,22 @@ function renderPracticeAnalysisWrongNote(midi: number, count: number, maxCount: 
 
   return `
     <div class="practice-analysis-wrong-note" style="top:${y.toFixed(1)}px; --dot-size:${size.toFixed(1)}px;" title="Played ${label} ${count} time${count === 1 ? "" : "s"}"></div>
+  `;
+}
+
+function renderPracticeAnalysisBleedNote(
+  midi: number,
+  stringId: InstrumentStringId,
+  count: number,
+  maxCount: number,
+): string {
+  const y = midiToStaffY(midi);
+  const ratio = count / Math.max(1, maxCount);
+  const size = 7 + ratio * 14;
+  const label = `${instrumentStringLabel(stringId)} string bleed | ${midiToScientific(midi)} | ${midiToSolfege(midi)}`;
+
+  return `
+    <div class="practice-analysis-bleed-note" style="top:${y.toFixed(1)}px; --dot-size:${size.toFixed(1)}px;" title="${label} ${count} time${count === 1 ? "" : "s"}"></div>
   `;
 }
 
@@ -4898,6 +5152,10 @@ async function startSheetPlayback(): Promise<void> {
     return;
   }
 
+  if (practicePatternPlaying) {
+    stopPracticePatternPlayback(false);
+  }
+
   const instrument = sheetPlaybackInstrument;
   setAudioSessionType(state.listening ? "play-and-record" : "playback");
   const ctx = await ensureSharedAudioContext();
@@ -4909,17 +5167,19 @@ async function startSheetPlayback(): Promise<void> {
   const compressor = ctx.createDynamicsCompressor();
   compressor.threshold.setValueAtTime(-24, startAt);
   compressor.knee.setValueAtTime(18, startAt);
-  compressor.ratio.setValueAtTime(instrument === "piano" ? 2.4 : 3.2, startAt);
-  compressor.attack.setValueAtTime(0.004, startAt);
-  compressor.release.setValueAtTime(instrument === "piano" ? 0.24 : 0.16, startAt);
-  master.gain.setValueAtTime(instrument === "piano" ? 0.78 : 0.95, startAt);
+  compressor.ratio.setValueAtTime(instrument === "piano" ? 2.4 : 2.6, startAt);
+  compressor.attack.setValueAtTime(instrument === "piano" ? 0.004 : 0.009, startAt);
+  compressor.release.setValueAtTime(instrument === "piano" ? 0.24 : 0.22, startAt);
+  master.gain.setValueAtTime(instrument === "piano" ? 0.78 : 0.88, startAt);
   master.connect(compressor);
   compressor.connect(ctx.destination);
 
   const sources: AudioScheduledSourceNode[] = [];
+  const stepDurationsSec: number[] = [];
   let cursor = startAt;
   for (const step of steps) {
     const durationSec = clamp(step.durationBeats * beatSec, 0.08, 8);
+    stepDurationsSec.push(durationSec);
     if (step.midi !== null) {
       if (instrument === "piano") {
         schedulePianoNote(ctx, master, step.midi, cursor, durationSec, sources);
@@ -4930,16 +5190,29 @@ async function startSheetPlayback(): Promise<void> {
     cursor += durationSec;
   }
 
-  const releaseTailSec = instrument === "piano" ? 1.15 : 0.36;
-  activeSheetPlayback = { gain: master, sources };
+  const releaseTailSec = instrument === "piano" ? 1.15 : 0.56;
+  const playback: ActiveSheetPlayback = { gain: master, sources, steps, timers: [] };
+  activeSheetPlayback = playback;
   sheetPlaybackPlaying = true;
+  sheetPlaybackActiveStepIndex = null;
+  practicePatternLastScrolledRow = -1;
+  playback.timers = scheduleSheetPlaybackHighlightTimers(
+    playback,
+    stepDurationsSec,
+    Math.max(0, startAt - ctx.currentTime),
+  );
   if (sheetPlaybackStopTimer !== null) {
     window.clearTimeout(sheetPlaybackStopTimer);
   }
   sheetPlaybackStopTimer = window.setTimeout(() => {
+    if (activeSheetPlayback !== playback) {
+      return;
+    }
     sheetPlaybackStopTimer = null;
+    clearSheetPlaybackHighlightTimers(playback);
     activeSheetPlayback = null;
     sheetPlaybackPlaying = false;
+    sheetPlaybackActiveStepIndex = null;
     scheduleRender();
   }, Math.max(0, (cursor + releaseTailSec - ctx.currentTime) * 1000));
   scheduleRender();
@@ -4954,11 +5227,13 @@ function stopSheetPlayback(fade = true): void {
   const playback = activeSheetPlayback;
   activeSheetPlayback = null;
   sheetPlaybackPlaying = false;
+  sheetPlaybackActiveStepIndex = null;
   if (!playback) {
     scheduleRender();
     return;
   }
 
+  clearSheetPlaybackHighlightTimers(playback);
   const { gain, sources } = playback;
   const now = gain.context.currentTime;
   const releaseSec = fade ? 0.08 : 0.012;
@@ -4975,6 +5250,43 @@ function stopSheetPlayback(fade = true): void {
   scheduleRender();
 }
 
+function scheduleSheetPlaybackHighlightTimers(
+  playback: ActiveSheetPlayback,
+  stepDurationsSec: number[],
+  startDelaySec: number,
+): number[] {
+  const timers: number[] = [];
+  let elapsedSec = 0;
+
+  playback.steps.forEach((step, stepIndex) => {
+    timers.push(window.setTimeout(() => {
+      if (activeSheetPlayback !== playback || !sheetPlaybackPlaying) {
+        return;
+      }
+      sheetPlaybackActiveStepIndex = step.midi === null ? null : stepIndex;
+      scheduleRender();
+    }, Math.max(0, (startDelaySec + elapsedSec) * 1000)));
+    elapsedSec += stepDurationsSec[stepIndex] ?? 0;
+  });
+
+  timers.push(window.setTimeout(() => {
+    if (activeSheetPlayback !== playback || !sheetPlaybackPlaying) {
+      return;
+    }
+    sheetPlaybackActiveStepIndex = null;
+    scheduleRender();
+  }, Math.max(0, (startDelaySec + elapsedSec) * 1000)));
+
+  return timers;
+}
+
+function clearSheetPlaybackHighlightTimers(playback: ActiveSheetPlayback): void {
+  for (const timer of playback.timers) {
+    window.clearTimeout(timer);
+  }
+  playback.timers = [];
+}
+
 function isSheetPlaybackMode(): boolean {
   return state.mode === "practice" || state.mode === "sheet-entry" || state.mode === "tuning";
 }
@@ -4988,15 +5300,18 @@ function currentSheetPlaybackSteps(): SheetPlaybackStep[] {
     return sheetEntryPlaybackSteps();
   }
   if (state.mode === "practice") {
-    return selectedPracticePattern().notes.map((note) => ({
+    return selectedPracticePattern().notes.map((note, noteIndex) => ({
       midi: clamp(Math.round(note.midi), 0, 127),
       durationBeats: practicePatternNoteDurationBeats(note),
+      practiceNoteIndex: noteIndex,
     }));
   }
   if (state.mode === "tuning") {
-    return tuningTargets().map((target) => ({
+    return tuningTargets().map((target, targetIndex) => ({
       midi: clamp(Math.round(target.slot.midi), 0, 127),
       durationBeats: 1,
+      sheetSlotIndices: [target.slotIndex],
+      tuningTargetIndex: targetIndex,
     }));
   }
   return [];
@@ -5008,13 +5323,20 @@ function sheetEntryPlaybackSteps(): SheetPlaybackStep[] {
     sheetEntrySlotDurationBeats(sheetEntrySlotValue),
   );
   const steps: SheetPlaybackStep[] = [];
-  for (const slot of sheetEntrySlots) {
+  for (const [slotIndex, slot] of sheetEntrySlots.entries()) {
     const midi = slot ? clamp(Math.round(slot.midi), 0, 127) : null;
     const previous = steps[steps.length - 1];
     if (previous && previous.midi === midi) {
       previous.durationBeats += slotBeats;
+      if (slot && previous.sheetSlotIndices) {
+        previous.sheetSlotIndices.push(slotIndex);
+      }
     } else {
-      steps.push({ midi, durationBeats: slotBeats });
+      steps.push({
+        midi,
+        durationBeats: slotBeats,
+        sheetSlotIndices: slot ? [slotIndex] : undefined,
+      });
     }
   }
   return trimSilentSheetPlaybackEdges(steps);
@@ -5032,6 +5354,49 @@ function trimSilentSheetPlaybackEdges(steps: SheetPlaybackStep[]): SheetPlayback
   return steps.slice(start, end);
 }
 
+function activeSheetPlaybackStep(): SheetPlaybackStep | null {
+  if (!sheetPlaybackPlaying || sheetPlaybackActiveStepIndex === null) {
+    return null;
+  }
+  return activeSheetPlayback?.steps[sheetPlaybackActiveStepIndex] ?? null;
+}
+
+function activeSheetPlaybackPracticeNoteIndex(): number | null {
+  const step = activeSheetPlaybackStep();
+  if (!step || step.midi === null) {
+    return null;
+  }
+  return step.practiceNoteIndex ?? null;
+}
+
+function isSheetPlaybackSlotActive(slotIndex: number): boolean {
+  const step = activeSheetPlaybackStep();
+  return !!step && step.midi !== null && step.sheetSlotIndices?.includes(slotIndex) === true;
+}
+
+function activeSheetPlaybackTuningTargetIndex(): number | null {
+  const step = activeSheetPlaybackStep();
+  if (!step || step.midi === null) {
+    return null;
+  }
+  return step.tuningTargetIndex ?? null;
+}
+
+type ViolinPitchMotion = {
+  vibratoDepth: GainNode;
+  jitterGain: GainNode;
+};
+
+type ViolinStringVoice = {
+  brightness: number;
+  warmth: number;
+  bowNoise: number;
+  bodyGain: number;
+  bridgeGainDb: number;
+  detuneSpreadCents: number;
+  partialSkew: number;
+};
+
 function scheduleViolinNote(
   ctx: AudioContext,
   destination: AudioNode,
@@ -5047,41 +5412,84 @@ function scheduleViolinNote(
   }
 
   const duration = Math.max(0.08, durationSec);
-  const attackSec = Math.min(0.085, duration * 0.45);
-  const releaseSec = clamp(duration * 0.42, 0.12, 0.3);
+  const voice = violinStringVoiceForMidi(normalizedMidi);
+  const attackSec = clamp(duration * 0.23 + randomBetween(-0.006, 0.012), 0.038, 0.096);
+  const releaseSec = clamp(duration * 0.36 + randomBetween(-0.015, 0.02), 0.14, 0.38);
   const noteEndAt = startAt + duration;
-  const bodyAt = Math.min(noteEndAt, startAt + Math.max(attackSec + 0.02, duration * 0.68));
-  const stopAt = noteEndAt + releaseSec + 0.08;
+  const biteAt = Math.min(noteEndAt - 0.02, startAt + Math.min(attackSec * 0.46, 0.028));
+  const peakAt = Math.min(noteEndAt - 0.012, startAt + attackSec);
+  const bodyAt = Math.min(noteEndAt - 0.006, startAt + Math.max(attackSec + 0.035, duration * 0.7));
+  const stopAt = noteEndAt + releaseSec + 0.12;
+  const peakLevel = 0.2 * voice.bodyGain * randomBetween(0.93, 1.08);
+  const sustainLevel = peakLevel * randomBetween(0.72, 0.84);
   const noteGain = ctx.createGain();
   noteGain.connect(destination);
   noteGain.gain.setValueAtTime(0.0001, startAt);
-  noteGain.gain.exponentialRampToValueAtTime(0.24, startAt + attackSec);
-  noteGain.gain.exponentialRampToValueAtTime(0.18, bodyAt);
-  noteGain.gain.setValueAtTime(0.18, noteEndAt);
+  noteGain.gain.linearRampToValueAtTime(peakLevel * 1.08, biteAt);
+  noteGain.gain.exponentialRampToValueAtTime(peakLevel, peakAt);
+  noteGain.gain.exponentialRampToValueAtTime(sustainLevel, bodyAt);
+  noteGain.gain.setValueAtTime(sustainLevel, noteEndAt);
   noteGain.gain.exponentialRampToValueAtTime(0.0001, noteEndAt + releaseSec);
 
   const sourceBus = ctx.createGain();
-  sourceBus.gain.setValueAtTime(0.82, startAt);
-  connectViolinBody(ctx, sourceBus, noteGain, frequency, startAt);
+  shapeViolinBowPressure(sourceBus.gain, startAt, noteEndAt, 0.86 * randomBetween(0.94, 1.04));
+  connectViolinBody(ctx, sourceBus, noteGain, frequency, voice, startAt);
 
-  const vibrato = ctx.createOscillator();
-  const vibratoDepth = ctx.createGain();
-  vibrato.type = "sine";
-  vibrato.frequency.setValueAtTime(5.4, startAt);
-  vibratoDepth.gain.setValueAtTime(0, startAt);
-  vibratoDepth.gain.linearRampToValueAtTime(9.5, startAt + Math.min(0.32, duration * 0.8));
-  vibrato.connect(vibratoDepth);
-
-  sources.push(vibrato);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "sawtooth", 0.62, 0, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 1, "triangle", 0.22, -5, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 2, "sine", 0.18, 3, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 3, "sine", 0.1, -4, startAt, stopAt, sources);
-  addViolinOscillator(ctx, sourceBus, vibratoDepth, frequency, 4, "sine", 0.045, 6, startAt, stopAt, sources);
-  addBowNoise(ctx, sourceBus, duration + releaseSec, startAt, stopAt, sources);
-
-  vibrato.start(startAt);
-  vibrato.stop(stopAt);
+  const pitchMotion = createViolinPitchMotion(ctx, duration, startAt, stopAt, sources);
+  const bowedWave = createBowedViolinWave(ctx, frequency, voice);
+  addViolinWaveOscillator(
+    ctx,
+    sourceBus,
+    bowedWave,
+    pitchMotion,
+    frequency,
+    0.72,
+    randomBetween(-voice.detuneSpreadCents, voice.detuneSpreadCents),
+    startAt,
+    stopAt,
+    sources,
+  );
+  addViolinPartialOscillator(
+    ctx,
+    sourceBus,
+    pitchMotion,
+    frequency,
+    1,
+    "triangle",
+    0.12 * voice.warmth,
+    randomBetween(-5.5, -2.5),
+    startAt,
+    stopAt,
+    sources,
+  );
+  addViolinPartialOscillator(
+    ctx,
+    sourceBus,
+    pitchMotion,
+    frequency,
+    2,
+    "sine",
+    0.07 * voice.brightness,
+    randomBetween(-2.5, 3.5),
+    startAt,
+    stopAt,
+    sources,
+  );
+  addViolinPartialOscillator(
+    ctx,
+    sourceBus,
+    pitchMotion,
+    frequency,
+    3,
+    "sine",
+    0.038 * voice.brightness,
+    randomBetween(-4.5, 4.5),
+    startAt,
+    stopAt,
+    sources,
+  );
+  addBowNoise(ctx, sourceBus, voice, duration + releaseSec, startAt, stopAt, sources);
+  addBowBite(ctx, sourceBus, frequency, voice, startAt, sources);
 }
 
 function schedulePianoNote(
@@ -5171,10 +5579,147 @@ function addPianoHammerNoise(
   sources.push(noise);
 }
 
-function addViolinOscillator(
+function violinStringVoiceForMidi(midi: number): ViolinStringVoice {
+  const stringIndex = INSTRUMENT_STRINGS.findIndex((string) => midi >= string.openMidi - 1);
+  const fallbackIndex = INSTRUMENT_STRINGS.length - 1;
+  const selectedIndex = stringIndex >= 0 ? stringIndex : fallbackIndex;
+  const highness =
+    INSTRUMENT_STRINGS.length <= 1
+      ? 0.5
+      : 1 - selectedIndex / Math.max(1, INSTRUMENT_STRINGS.length - 1);
+
+  return {
+    brightness: 0.82 + highness * 0.34,
+    warmth: 1.12 - highness * 0.22,
+    bowNoise: 0.019 + highness * 0.011,
+    bodyGain: 0.96 - highness * 0.04,
+    bridgeGainDb: 2.2 + highness * 1.5,
+    detuneSpreadCents: 2.6 - highness * 0.7,
+    partialSkew: highness * 1.37 + randomBetween(-0.28, 0.28),
+  };
+}
+
+function createBowedViolinWave(ctx: BaseAudioContext, frequency: number, voice: ViolinStringVoice): PeriodicWave {
+  const maxHarmonic = clamp(Math.floor((ctx.sampleRate * 0.46) / frequency), 8, 34);
+  const real = new Float32Array(maxHarmonic + 1);
+  const imag = new Float32Array(maxHarmonic + 1);
+  const harmonicSlope = 0.82 + (1.12 - voice.brightness) * 0.22;
+
+  for (let harmonic = 1; harmonic <= maxHarmonic; harmonic += 1) {
+    const harmonicHz = frequency * harmonic;
+    const bridgeHill = 1 + resonanceBand(harmonicHz, 2850, 0.38) * 0.42 * voice.brightness;
+    const bodyWarmth = 1 + resonanceBand(harmonicHz, 460, 0.55) * 0.2 * voice.warmth;
+    const highDamping = harmonicHz > 7600 ? clamp(1 - (harmonicHz - 7600) / 5400, 0.18, 1) : 1;
+    const rosinRipple = 1 + Math.sin(harmonic * 1.63 + voice.partialSkew) * 0.055;
+    const oddEvenTilt = harmonic % 2 === 0 ? 0.94 : 1.05;
+    imag[harmonic] =
+      (bridgeHill * bodyWarmth * highDamping * rosinRipple * oddEvenTilt) / harmonic ** harmonicSlope;
+  }
+
+  return ctx.createPeriodicWave(real, imag, { disableNormalization: false });
+}
+
+function createViolinPitchMotion(
+  ctx: AudioContext,
+  durationSec: number,
+  startAt: number,
+  stopAt: number,
+  sources: AudioScheduledSourceNode[],
+): ViolinPitchMotion {
+  const vibrato = ctx.createOscillator();
+  const vibratoDepth = ctx.createGain();
+  const vibratoDelay = clamp(durationSec * 0.3, 0.075, 0.23);
+  const vibratoRise = clamp(durationSec * 0.35, 0.11, 0.34);
+  const vibratoOnAt = startAt + Math.min(vibratoDelay, durationSec * 0.78);
+  const vibratoFullAt = Math.max(vibratoOnAt + 0.012, Math.min(stopAt - 0.02, vibratoOnAt + vibratoRise));
+  const targetDepthCents =
+    durationSec < 0.22 ? clamp(durationSec * 16, 1.4, 4.2) : clamp(4.9 + durationSec * 1.25, 4.8, 8.4);
+
+  vibrato.type = "sine";
+  vibrato.frequency.setValueAtTime(randomBetween(5.25, 5.95), startAt);
+  vibrato.frequency.linearRampToValueAtTime(
+    randomBetween(5.45, 6.25),
+    Math.max(startAt + 0.04, Math.min(stopAt - 0.02, startAt + durationSec * 0.78)),
+  );
+  vibratoDepth.gain.setValueAtTime(0, startAt);
+  vibratoDepth.gain.setValueAtTime(0, vibratoOnAt);
+  vibratoDepth.gain.linearRampToValueAtTime(targetDepthCents * randomBetween(0.86, 1.12), vibratoFullAt);
+  vibrato.connect(vibratoDepth);
+  vibrato.start(startAt);
+  vibrato.stop(stopAt);
+  sources.push(vibrato);
+
+  const jitterGain = createViolinPitchJitter(ctx, startAt, stopAt, randomBetween(0.32, 0.78), sources);
+  return { vibratoDepth, jitterGain };
+}
+
+function createViolinPitchJitter(
+  ctx: AudioContext,
+  startAt: number,
+  stopAt: number,
+  amountCents: number,
+  sources: AudioScheduledSourceNode[],
+): GainNode {
+  const durationSec = Math.max(0.1, stopAt - startAt);
+  const frameCount = Math.ceil(ctx.sampleRate * durationSec);
+  const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  const updateFrames = Math.max(1, Math.round(ctx.sampleRate / 34));
+  let current = 0;
+  let target = 0;
+  for (let i = 0; i < frameCount; i += 1) {
+    if (i % updateFrames === 0) {
+      target = Math.random() * 2 - 1;
+    }
+    current += (target - current) * 0.006;
+    data[i] = current;
+  }
+
+  const jitter = ctx.createBufferSource();
+  const gain = ctx.createGain();
+  const sustainAt = Math.max(startAt + 0.045, stopAt - 0.08);
+  jitter.buffer = buffer;
+  gain.gain.setValueAtTime(0, startAt);
+  gain.gain.linearRampToValueAtTime(amountCents, startAt + 0.04);
+  gain.gain.setValueAtTime(amountCents, sustainAt);
+  gain.gain.linearRampToValueAtTime(0, stopAt);
+  jitter.connect(gain);
+  jitter.start(startAt);
+  jitter.stop(stopAt);
+  sources.push(jitter);
+  return gain;
+}
+
+function addViolinWaveOscillator(
   ctx: AudioContext,
   destination: AudioNode,
-  vibratoDepth: GainNode,
+  wave: PeriodicWave,
+  pitchMotion: ViolinPitchMotion,
+  frequency: number,
+  level: number,
+  detuneCents: number,
+  startAt: number,
+  stopAt: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.setPeriodicWave(wave);
+  osc.frequency.setValueAtTime(frequency, startAt);
+  osc.detune.setValueAtTime(detuneCents, startAt);
+  connectViolinPitchMotion(pitchMotion, osc);
+  gain.gain.setValueAtTime(level, startAt);
+  osc.connect(gain);
+  gain.connect(destination);
+  osc.start(startAt);
+  osc.stop(stopAt);
+  sources.push(osc);
+}
+
+function addViolinPartialOscillator(
+  ctx: AudioContext,
+  destination: AudioNode,
+  pitchMotion: ViolinPitchMotion,
   frequency: number,
   harmonic: number,
   type: OscillatorType,
@@ -5184,12 +5729,16 @@ function addViolinOscillator(
   stopAt: number,
   sources: AudioScheduledSourceNode[],
 ): void {
+  if (frequency * harmonic > ctx.sampleRate * 0.45) {
+    return;
+  }
+
   const osc = ctx.createOscillator();
   const gain = ctx.createGain();
   osc.type = type;
   osc.frequency.setValueAtTime(frequency * harmonic, startAt);
   osc.detune.setValueAtTime(detuneCents, startAt);
-  vibratoDepth.connect(osc.detune);
+  connectViolinPitchMotion(pitchMotion, osc);
   gain.gain.setValueAtTime(level, startAt);
   osc.connect(gain);
   gain.connect(destination);
@@ -5198,29 +5747,49 @@ function addViolinOscillator(
   sources.push(osc);
 }
 
+function connectViolinPitchMotion(pitchMotion: ViolinPitchMotion, osc: OscillatorNode): void {
+  pitchMotion.vibratoDepth.connect(osc.detune);
+  pitchMotion.jitterGain.connect(osc.detune);
+}
+
 function connectViolinBody(
   ctx: AudioContext,
   source: AudioNode,
   destination: AudioNode,
   frequency: number,
+  voice: ViolinStringVoice,
   startAt: number,
 ): void {
+  const highpass = ctx.createBiquadFilter();
+  const bridge = ctx.createBiquadFilter();
   const dryFilter = ctx.createBiquadFilter();
   const dryGain = ctx.createGain();
+  highpass.type = "highpass";
+  highpass.frequency.setValueAtTime(110, startAt);
+  highpass.Q.setValueAtTime(0.45, startAt);
+  bridge.type = "peaking";
+  bridge.frequency.setValueAtTime(clamp(frequency * 6.5, 2250, 3350), startAt);
+  bridge.Q.setValueAtTime(0.85, startAt);
+  bridge.gain.setValueAtTime(voice.bridgeGainDb, startAt);
   dryFilter.type = "lowpass";
-  dryFilter.frequency.setValueAtTime(clamp(frequency * 18, 2600, 7400), startAt);
-  dryFilter.Q.setValueAtTime(0.72, startAt);
-  dryGain.gain.setValueAtTime(0.78, startAt);
-  source.connect(dryFilter);
+  dryFilter.frequency.setValueAtTime(clamp(frequency * (14 + voice.brightness * 4), 3600, 8800), startAt);
+  dryFilter.Q.setValueAtTime(0.55, startAt);
+  dryGain.gain.setValueAtTime(0.66, startAt);
+  source.connect(highpass);
+  highpass.connect(bridge);
+  bridge.connect(dryFilter);
   dryFilter.connect(dryGain);
   dryGain.connect(destination);
 
   const resonances = [
-    { frequency: 285, q: 1.2, gain: 0.08 },
-    { frequency: 460, q: 1.05, gain: 0.07 },
-    { frequency: 930, q: 1.25, gain: 0.055 },
-    { frequency: 1650, q: 1.15, gain: 0.04 },
-    { frequency: 3100, q: 0.9, gain: 0.025 },
+    { frequency: 190, q: 0.9, gain: 0.03 * voice.warmth },
+    { frequency: 285, q: 1.15, gain: 0.075 * voice.warmth },
+    { frequency: 430, q: 1.05, gain: 0.07 * voice.warmth },
+    { frequency: 560, q: 1.0, gain: 0.047 },
+    { frequency: 880, q: 1.18, gain: 0.055 },
+    { frequency: 1320, q: 1.05, gain: 0.036 },
+    { frequency: 2450, q: 0.95, gain: 0.037 * voice.brightness },
+    { frequency: 3180, q: 0.85, gain: 0.031 * voice.brightness },
   ];
 
   for (const resonance of resonances) {
@@ -5239,6 +5808,7 @@ function connectViolinBody(
 function addBowNoise(
   ctx: AudioContext,
   destination: AudioNode,
+  voice: ViolinStringVoice,
   durationSec: number,
   startAt: number,
   stopAt: number,
@@ -5248,31 +5818,117 @@ function addBowNoise(
   const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
   const data = buffer.getChannelData(0);
   let smoothed = 0;
+  let grain = 0;
   for (let i = 0; i < frameCount; i += 1) {
-    smoothed = smoothed * 0.9 + (Math.random() * 2 - 1) * 0.1;
-    data[i] = smoothed;
+    const white = Math.random() * 2 - 1;
+    smoothed = smoothed * 0.965 + white * 0.035;
+    grain = grain * 0.72 + white * 0.28;
+    data[i] = smoothed * 0.7 + grain * 0.3;
   }
 
   const noise = ctx.createBufferSource();
-  const filter = ctx.createBiquadFilter();
-  const gain = ctx.createGain();
+  const broadHighpass = ctx.createBiquadFilter();
+  const broadLowpass = ctx.createBiquadFilter();
+  const broadGain = ctx.createGain();
+  const rosinFilter = ctx.createBiquadFilter();
+  const rosinGain = ctx.createGain();
   noise.buffer = buffer;
-  filter.type = "bandpass";
-  filter.frequency.setValueAtTime(3200, startAt);
-  filter.Q.setValueAtTime(0.65, startAt);
-  const attackAt = Math.min(stopAt - 0.08, startAt + 0.05);
+  broadHighpass.type = "highpass";
+  broadHighpass.frequency.setValueAtTime(650, startAt);
+  broadHighpass.Q.setValueAtTime(0.45, startAt);
+  broadLowpass.type = "lowpass";
+  broadLowpass.frequency.setValueAtTime(6200, startAt);
+  broadLowpass.Q.setValueAtTime(0.55, startAt);
+  rosinFilter.type = "bandpass";
+  rosinFilter.frequency.setValueAtTime(2850 + voice.brightness * 420, startAt);
+  rosinFilter.Q.setValueAtTime(1.05, startAt);
+  const attackAt = Math.min(stopAt - 0.08, startAt + randomBetween(0.032, 0.06));
   const sustainAt = Math.min(stopAt - 0.055, startAt + Math.max(0.08, durationSec * 0.7));
   const releaseAt = Math.max(sustainAt + 0.006, stopAt - 0.04);
-  gain.gain.setValueAtTime(0.0001, startAt);
-  gain.gain.linearRampToValueAtTime(0.024, Math.max(startAt + 0.004, attackAt));
-  gain.gain.exponentialRampToValueAtTime(0.014, Math.max(attackAt + 0.004, sustainAt));
-  gain.gain.exponentialRampToValueAtTime(0.0001, releaseAt);
-  noise.connect(filter);
-  filter.connect(gain);
-  gain.connect(destination);
+  broadGain.gain.setValueAtTime(0.0001, startAt);
+  broadGain.gain.linearRampToValueAtTime(voice.bowNoise * randomBetween(0.8, 1.12), Math.max(startAt + 0.004, attackAt));
+  broadGain.gain.exponentialRampToValueAtTime(
+    voice.bowNoise * randomBetween(0.45, 0.62),
+    Math.max(attackAt + 0.004, sustainAt),
+  );
+  broadGain.gain.exponentialRampToValueAtTime(0.0001, releaseAt);
+  rosinGain.gain.setValueAtTime(0.0001, startAt);
+  rosinGain.gain.linearRampToValueAtTime(
+    voice.bowNoise * 0.62 * randomBetween(0.82, 1.15),
+    Math.max(startAt + 0.006, attackAt),
+  );
+  rosinGain.gain.exponentialRampToValueAtTime(0.0001, releaseAt);
+  noise.connect(broadHighpass);
+  broadHighpass.connect(broadLowpass);
+  broadLowpass.connect(broadGain);
+  broadGain.connect(destination);
+  noise.connect(rosinFilter);
+  rosinFilter.connect(rosinGain);
+  rosinGain.connect(destination);
   noise.start(startAt);
   noise.stop(stopAt);
   sources.push(noise);
+}
+
+function addBowBite(
+  ctx: AudioContext,
+  destination: AudioNode,
+  frequency: number,
+  voice: ViolinStringVoice,
+  startAt: number,
+  sources: AudioScheduledSourceNode[],
+): void {
+  const durationSec = randomBetween(0.046, 0.074);
+  const stopAt = startAt + durationSec;
+  const frameCount = Math.ceil(ctx.sampleRate * durationSec);
+  const buffer = ctx.createBuffer(1, frameCount, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  let smoothed = 0;
+  for (let i = 0; i < frameCount; i += 1) {
+    const t = i / Math.max(1, frameCount - 1);
+    smoothed = smoothed * 0.58 + (Math.random() * 2 - 1) * 0.42;
+    data[i] = smoothed * (1 - t) ** 2.25;
+  }
+
+  const bite = ctx.createBufferSource();
+  const filter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  bite.buffer = buffer;
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(clamp(frequency * 7.5, 1300, 4300), startAt);
+  filter.Q.setValueAtTime(1.5, startAt);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.linearRampToValueAtTime(voice.bowNoise * randomBetween(1.45, 1.95), startAt + 0.006);
+  gain.gain.exponentialRampToValueAtTime(0.0001, stopAt);
+  bite.connect(filter);
+  filter.connect(gain);
+  gain.connect(destination);
+  bite.start(startAt);
+  bite.stop(stopAt);
+  sources.push(bite);
+}
+
+function shapeViolinBowPressure(param: AudioParam, startAt: number, endAt: number, baseLevel: number): void {
+  const settleAt = Math.min(endAt - 0.012, startAt + 0.036);
+  param.setValueAtTime(baseLevel * randomBetween(0.9, 0.97), startAt);
+  param.linearRampToValueAtTime(baseLevel * randomBetween(1.0, 1.08), Math.max(startAt + 0.006, settleAt));
+
+  for (let cursor = startAt + 0.12; cursor < endAt - 0.03; cursor += randomBetween(0.085, 0.16)) {
+    param.linearRampToValueAtTime(baseLevel * randomBetween(0.93, 1.07), cursor);
+  }
+  param.linearRampToValueAtTime(baseLevel * randomBetween(0.86, 0.96), endAt);
+}
+
+function resonanceBand(frequency: number, center: number, octaveWidth: number): number {
+  if (frequency <= 0 || center <= 0 || octaveWidth <= 0) {
+    return 0;
+  }
+  const distance = Math.log2(frequency / center) / octaveWidth;
+  return Math.exp(-0.5 * distance * distance);
+}
+
+function randomBetween(min: number, max: number): number {
+  return min + Math.random() * (max - min);
 }
 
 function resetMetronomeClock(): void {
@@ -6307,7 +6963,7 @@ function renderBeatBatchCard(batch: BeatBatch, className: string, style: string)
 }
 
 function renderStaffPracticePattern(nowMs: number): string {
-  const activeIndex = practicePatternCurrentIndex(nowMs);
+  const activeIndex = activeSheetPlaybackPracticeNoteIndex() ?? practicePatternCurrentIndex(nowMs);
   const pattern = selectedPracticePattern();
   practicePatternActiveIndex = activeIndex;
 
@@ -6380,7 +7036,13 @@ function renderStaffPracticePattern(nowMs: number): string {
 }
 
 function scrollPracticeSheetToActiveRow(): void {
-  if (!ui || state.mode !== "practice") {
+  if (
+    !ui ||
+    (
+      state.mode !== "practice" &&
+      !(sheetPlaybackPlaying && state.mode === "sheet-entry")
+    )
+  ) {
     return;
   }
   const activeSlot = ui.staff.querySelector<HTMLElement>(".practice-pattern-slot.active-slot");
@@ -6493,9 +7155,10 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
       const patternIndex = patternIndexBySlot.get(index) ?? null;
       const result = patternIndex !== null ? visiblePracticePatternResult(practicePatternResults[patternIndex]) : null;
       const status = practiceMode && result ? result.status : "pending";
-      const activeClass = practiceMode && activePatternIndex !== null && patternIndex === activePatternIndex
-        ? "active active-slot"
-        : "";
+      const isActive =
+        isSheetPlaybackSlotActive(index) ||
+        (practiceMode && activePatternIndex !== null && patternIndex === activePatternIndex);
+      const activeClass = isActive ? "active active-slot" : "";
 
       if (!slot) {
         return `
@@ -6526,7 +7189,7 @@ function renderStaffSheetEntry(practiceMode = false, nowMs = performance.now()):
       return `
         <div class="practice-pattern-slot sheet-entry-slot ${activeClass}" data-row-index="${rowIndex}" data-slot-index="${index}">
           ${ledgers}
-          <div class="staff-batch-note value-quarter sheet-entry-note practice-pattern-note ${statusClass} ${practiceMode && patternIndex === activePatternIndex ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${noteTooltip(slot.midi)}">
+          <div class="staff-batch-note value-quarter sheet-entry-note practice-pattern-note ${statusClass} ${isActive ? "active" : ""} ${stemDirection === "up" ? "stem-up" : "stem-down"}" style="top:${y.toFixed(1)}px;" title="${noteTooltip(slot.midi)}">
             ${accidental ? `<div class="sheet-entry-accidental">${accidental}</div>` : ""}
             <div class="staff-batch-note-head"></div>
             <div class="staff-batch-note-stem"></div>
@@ -6569,6 +7232,7 @@ function renderStaffTuningSheet(nowMs = performance.now()): string {
   resizeTuningSlots(tuningStringCount);
   const targets = tuningTargets();
   const targetIndexBySlot = tuningTargetIndexBySlot();
+  const playbackActiveTargetIndex = activeSheetPlaybackTuningTargetIndex();
   const rowCount = Math.max(1, Math.ceil(tuningStringCount / TUNING_TARGETS_PER_ROW));
   const rows = Array.from({ length: rowCount }, (_, rowIndex) => {
     const startIndex = rowIndex * TUNING_TARGETS_PER_ROW;
@@ -6577,11 +7241,14 @@ function renderStaffTuningSheet(nowMs = performance.now()): string {
       const index = startIndex + localIndex;
       const targetIndex = targetIndexBySlot.get(index) ?? null;
       const result = targetIndex !== null ? tuningResults[targetIndex] : null;
-      const isActive =
+      const isTuningActive =
         targetIndex !== null &&
         targetIndex === tuningTargetCursor &&
         tuningPhase !== "idle" &&
         tuningPhase !== "complete";
+      const isActive =
+        isTuningActive ||
+        (targetIndex !== null && targetIndex === playbackActiveTargetIndex);
       const status = result?.status ?? "pending";
       const centsText = result?.cents === null || result?.cents === undefined
         ? ""

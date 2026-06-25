@@ -50,5 +50,7 @@ describe("selectBasicPitchFrame", () => {
     expect(frame.midi).toBe(69);
     expect(frame.freqHz).toBeCloseTo(440, 0);
     expect(frame.confidence).toBeCloseTo(0.72);
+    expect(frame.tMs).toBe(1200);
+    expect(frame.detectedAtMs).toBe(1000);
   });
 });

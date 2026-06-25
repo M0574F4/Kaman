@@ -1218,22 +1218,57 @@ button.primary {
   min-height: 250px;
 }
 
+.practice-analysis-pair-grid {
+  position: absolute;
+  inset: 0 0 0 4.35rem;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0.9rem minmax(0, 1fr);
+}
+
+.practice-analysis-half {
+  position: relative;
+  min-width: 0;
+}
+
+.analysis-bleed-half {
+  background: rgba(255, 251, 239, 0.68);
+}
+
+.practice-analysis-pair-gap {
+  border-left: 1px solid rgba(120, 101, 75, 0.22);
+}
+
+.practice-sheet-row.has-clef .practice-analysis-half .practice-pattern-grid {
+  left: 0;
+}
+
 .practice-analysis-target-note .staff-batch-note-head,
 .practice-analysis-target-note .staff-batch-note-stem {
   background: #111111;
 }
 
-.practice-analysis-wrong-note {
+.practice-analysis-wrong-note,
+.practice-analysis-bleed-note {
   position: absolute;
-  left: 50%;
   z-index: 4;
   width: var(--dot-size, 12px);
   height: var(--dot-size, 12px);
   border: 1px solid rgba(255, 254, 249, 0.92);
   border-radius: 999px;
+  transform: translate(-50%, -50%);
+}
+
+.practice-analysis-wrong-note {
+  left: 50%;
   background: #b00020;
   box-shadow: 0 0 0 1px rgba(176, 0, 32, 0.22);
-  transform: translate(-50%, -50%);
+}
+
+.practice-analysis-bleed-note {
+  left: 62%;
+  background: #b56818;
+  box-shadow: 0 0 0 1px rgba(181, 104, 24, 0.26);
 }
 
 .analysis-slot .practice-pattern-target {
@@ -1249,7 +1284,6 @@ button.primary {
   left: 0;
   right: 0;
   bottom: 6px;
-  color: #b00020;
   font-size: 0.56rem;
   font-weight: 700;
   line-height: 1.05;
@@ -1257,6 +1291,26 @@ button.primary {
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
+}
+
+.practice-analysis-errors.no-attempts {
+  color: #8a7a64;
+}
+
+.practice-analysis-errors.no-errors {
+  color: #2d6a4f;
+}
+
+.practice-analysis-errors.no-bleed {
+  color: #2d6a4f;
+}
+
+.practice-analysis-errors.has-errors {
+  color: #b00020;
+}
+
+.practice-analysis-errors.has-bleed {
+  color: #9a5b11;
 }
 
 .practice-debug-empty {
@@ -1746,6 +1800,17 @@ button.primary {
 
 .practice-pattern-slot.active-slot {
   background: linear-gradient(180deg, rgba(45, 106, 79, 0.1), transparent 60%);
+}
+
+.practice-pattern-slot.active-slot::after {
+  content: "";
+  position: absolute;
+  inset: 0.22rem 0.12rem 0.18rem;
+  z-index: 6;
+  border: 2px solid rgba(45, 106, 79, 0.72);
+  border-radius: 8px;
+  box-shadow: 0 0 0 3px rgba(45, 106, 79, 0.1);
+  pointer-events: none;
 }
 
 .practice-pattern-slot:last-child {

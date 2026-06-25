@@ -317,9 +317,11 @@ export function selectBasicPitchFrame(
   const midi = Math.round(midiFloat);
   const cents = (midiFloat - midi) * 100;
   const freqHz = 440 * 2 ** ((midiFloat - 69) / 12);
+  const noteEndSeconds = Math.min(windowSeconds, best.startTimeSeconds + best.durationSeconds);
 
   return {
     tMs,
+    detectedAtMs: tMs - windowSeconds * 1000 + noteEndSeconds * 1000,
     freqHz,
     midiFloat,
     midi,
@@ -561,6 +563,7 @@ function selectPitchDetectionFrame(
 
   return {
     tMs,
+    detectedAtMs: tMs - windowSeconds * 1000 + best.timeSeconds * 1000,
     freqHz: best.freqHz,
     midiFloat: best.midiFloat,
     midi,

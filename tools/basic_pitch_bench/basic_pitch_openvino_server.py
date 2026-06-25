@@ -300,6 +300,7 @@ def select_pitch_detection_frame(detections: List[Dict[str, Any]], window_second
     midi = round(best["midiFloat"])
     return {
         "tMs": t_ms,
+        "detectedAtMs": t_ms - window_seconds * 1000.0 + best["timeSeconds"] * 1000.0,
         "freqHz": best["freqHz"],
         "midiFloat": best["midiFloat"],
         "midi": midi,
